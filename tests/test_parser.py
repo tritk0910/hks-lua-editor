@@ -50,8 +50,8 @@ def test_act01_resolve_random_and_distance(parsed):
     # first item is the random branch derived from `local7 <= 30`
     branch = seq.steps[0]
     assert isinstance(branch, Branch)
-    assert branch.kind == "randam_percent"
-    assert branch.threshold == 30
+    assert branch.terms[0].kind == "randam"
+    assert branch.terms[0].threshold == 30
     # first step inside the true branch keeps its distance as a resolved expr
     first_step = branch.true_branch[0]
     assert isinstance(first_step, ComboStep)
@@ -70,8 +70,8 @@ def test_interrupt_5031_random_two_finals(parsed):
     seq = _interrupt(parsed, 5031)
     branch = seq.steps[0]
     assert isinstance(branch, Branch)
-    assert branch.kind == "randam_percent"
-    assert branch.threshold == 50
+    assert branch.terms[0].kind == "randam"
+    assert branch.terms[0].threshold == 50
     assert branch.true_branch[0].anim_id == 3049
     assert branch.false_branch[0].anim_id == 3041
 
@@ -97,8 +97,9 @@ def test_ninsatsu_condition_parsed(parsed):
     def find_ninsatsu(items):
         for it in items:
             if isinstance(it, Branch):
-                if it.kind == "ninsatsu":
-                    return it
+                for t in it.terms:
+                    if t.kind == "ninsatsu":
+                        return t
                 for sub in (it.true_branch, it.false_branch):
                     got = find_ninsatsu(sub)
                     if got:
@@ -112,6 +113,33 @@ def test_ninsatsu_condition_parsed(parsed):
             break
     assert found is not None
     assert found.operator in ("<=", ">=", "==", "<", ">")
+
+
+def test_speffect_and_compound_condition_parsed(parsed):
+    # Goal.Interrupt uses `... and arg1:HasSpecialEffectId(TARGET_SELF, 3710032)`
+    # and negated `not arg1:HasSpecialEffectId(...)`. Confirm terms are modelled.
+    from models import Branch
+
+    speffect_terms, compound_branches, negated = [], [], []
+
+    def walk(items):
+        for it in items:
+            if isinstance(it, Branch):
+                if len(it.terms) >= 2:
+                    compound_branches.append(it)
+                for t in it.terms:
+                    if t.kind == "speffect":
+                        speffect_terms.append(t)
+                    if t.negate:
+                        negated.append(t)
+                walk(it.true_branch)
+                walk(it.false_branch)
+
+    for seq in parsed.sequences:
+        walk(seq.steps)
+    assert speffect_terms, "expected at least one HasSpecialEffectId term"
+    assert all(t.target in ("TARGET_SELF", "TARGET_ENE_0") for t in speffect_terms)
+    assert compound_branches, "expected at least one multi-term (and/or) condition"
 
 
 def _kengeki(parsed, num):
@@ -140,12 +168,12 @@ def test_kengeki37_elseif_vs_nested_if(parsed):
     from models import Branch
     seq = _kengeki(parsed, 37)
     outer = next(s for s in seq.steps if isinstance(s, Branch))  # if <=50
-    assert outer.threshold == 50
+    assert outer.terms[0].threshold == 50
     inner = outer.false_branch[0]        # the nested `if <=33`
-    assert isinstance(inner, Branch) and inner.threshold == 33
+    assert isinstance(inner, Branch) and inner.terms[0].threshold == 33
     assert inner.from_elseif is False    # reached via `else { if }`, not elseif
     elseif66 = inner.false_branch[0]     # the real `elseif <=66`
-    assert isinstance(elseif66, Branch) and elseif66.threshold == 66
+    assert isinstance(elseif66, Branch) and elseif66.terms[0].threshold == 66
     assert elseif66.from_elseif is True
 
 

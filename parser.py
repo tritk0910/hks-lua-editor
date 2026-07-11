@@ -21,6 +21,7 @@ from models import (
     KengekiActivator,
     KengekiEffectBlock,
     KengekiWeight,
+    Term,
 )
 
 
@@ -167,30 +168,82 @@ def _parse_addsubgoal(text: str, locals_: dict, warnings: list) -> ComboStep:
                      distance=distance, target=target, extra_args=extra)
 
 
-def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
-    """Turn a Lua `if` condition into a Branch of the right kind."""
-    cond = cond.strip()
-    m = _RANDAM_RE.search(cond)
+def _split_top_level_bool(cond: str):
+    """Split a condition on top-level ` and `/` or ` (respecting parens).
+
+    Returns (connective, parts). connective is "and"/"or", None if there is no
+    top-level connective, or "__mixed__" if both appear (can't model cleanly).
+    """
+    parts, cur, depth, conns = [], "", 0, []
+    i, n = 0, len(cond)
+    while i < n:
+        c = cond[i]
+        if c == "(":
+            depth += 1; cur += c; i += 1
+        elif c == ")":
+            depth -= 1; cur += c; i += 1
+        elif depth == 0 and cond[i:i + 5] == " and ":
+            parts.append(cur); conns.append("and"); cur = ""; i += 5
+        elif depth == 0 and cond[i:i + 4] == " or ":
+            parts.append(cur); conns.append("or"); cur = ""; i += 4
+        else:
+            cur += c; i += 1
+    parts.append(cur)
+    if not conns:
+        return None, [cond]
+    if len(set(conns)) > 1:
+        return "__mixed__", [cond]
+    return conns[0], [p.strip() for p in parts]
+
+
+def _classify_term(cond: str, locals_: dict) -> Term:
+    """Classify one primitive condition into a Term (kind "raw" if unknown)."""
+    original = cond.strip()
+    body = original
+    negate = False
+    if body.startswith("not "):
+        negate, body = True, body[4:].strip()
+    m = re.match(r"^arg\d:HasSpecialEffectId\((TARGET_\w+),\s*(\d+)\)$", body)
     if m:
-        t = re.search(r"<=\s*(\d+)", cond)
+        return Term(kind="speffect", negate=negate,
+                    target=m.group(1), effect_id=int(m.group(2)))
+    if _RANDAM_RE.search(body):
+        t = re.search(r"<=\s*(\d+)", body)
         if t:
-            return Branch(kind="randam_percent", threshold=int(t.group(1)))
-    m = re.match(r"^randam\s*<=\s*(\d+)$", cond)
+            return Term(kind="randam", negate=negate, threshold=int(t.group(1)))
+    m = re.match(r"^randam\s*<=\s*(\d+)$", body)
     if m:
-        return Branch(kind="randam_percent", threshold=int(m.group(1)))
-    m = re.match(r"^(local\d+)\s*<=\s*(\d+)$", cond)
+        return Term(kind="randam", negate=negate, threshold=int(m.group(1)))
+    m = re.match(r"^(local\d+)\s*<=\s*(\d+)$", body)
     if m and isinstance(locals_.get(m.group(1)), dict):
-        return Branch(kind="randam_percent", threshold=int(m.group(2)))
-    m = re.match(r"^arg\d:GetNumber\((\d+)\)\s*==\s*(-?\d+)$", cond)
+        return Term(kind="randam", negate=negate, threshold=int(m.group(2)))
+    m = re.match(r"^arg\d:GetNumber\((\d+)\)\s*==\s*(-?\d+)$", body)
     if m:
-        return Branch(kind="state_check", state_index=int(m.group(1)),
-                      state_value=int(m.group(2)))
-    # ninsatsu (deathblow count / phase): inline call or the `ninsatsu` local
-    m = re.match(r"^(?:arg\d:GetNinsatsuNum\(\)|ninsatsu)\s*(<=|>=|==|<|>)\s*(\d+)$", cond)
+        return Term(kind="state", negate=negate,
+                    state_index=int(m.group(1)), state_value=int(m.group(2)))
+    m = re.match(r"^(?:arg\d:GetNinsatsuNum\(\)|ninsatsu)\s*(<=|>=|==|<|>)\s*(\d+)$", body)
     if m:
-        return Branch(kind="ninsatsu", operator=m.group(1), threshold=int(m.group(2)))
-    warnings.append(f"un-modelled condition kept raw: {cond}")
-    return Branch(kind="raw", raw_condition=cond)
+        return Term(kind="ninsatsu", negate=negate,
+                    operator=m.group(1), threshold=int(m.group(2)))
+    return Term(kind="raw", raw=original)
+
+
+def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
+    """Turn a Lua `if` condition into a Branch of one or more Terms."""
+    cond = cond.strip()
+    conn, parts = _split_top_level_bool(cond)
+    if conn == "__mixed__" or (conn is not None and any(p.startswith("(") for p in parts)):
+        warnings.append(f"un-modelled condition kept raw: {cond}")
+        return Branch(terms=[Term(kind="raw", raw=cond)])
+    if conn is None:
+        term = _classify_term(cond, locals_)
+        if term.kind == "raw":
+            warnings.append(f"un-modelled condition kept raw: {cond}")
+        return Branch(terms=[term])
+    terms = [_classify_term(p, locals_) for p in parts]
+    if any(t.kind == "raw" for t in terms):
+        warnings.append(f"partially-modelled condition: {cond}")
+    return Branch(terms=terms, connective=conn)
 
 
 def _addsubgoal_leaf(text, locals_, warnings):
@@ -272,13 +325,23 @@ def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_add
 
 # --- function / block discovery -------------------------------------------
 
-def _iter_functions(text: str):
-    """Yield (name, body_text) for each `Goal.X = function(...)` block."""
+def iter_function_spans(text: str):
+    """Yield (name, start, end) for each `Goal.X = function(...)` block.
+
+    Each span runs from the function's `Goal.X = function` start to the next
+    function's start (or EOF). Public so writer.py can splice by offset.
+    """
     starts = [(m.start(), m.group(1))
               for m in re.finditer(r"^Goal\.(\w+)\s*=\s*function", text, re.M)]
     for idx, (pos, name) in enumerate(starts):
         end = starts[idx + 1][0] if idx + 1 < len(starts) else len(text)
-        yield name, text[pos:end]
+        yield name, pos, end
+
+
+def _iter_functions(text: str):
+    """Yield (name, body_text) for each `Goal.X = function(...)` block."""
+    for name, start, end in iter_function_spans(text):
+        yield name, text[start:end]
 
 
 def _parse_approach(lines, locals_):

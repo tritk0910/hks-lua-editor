@@ -9,10 +9,12 @@ this file only wires widgets to the model.
 from __future__ import annotations
 
 import copy
+import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QAction, QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFileDialog,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenuBar,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -31,24 +34,27 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 import generator
 import visualizer
+import writer
 from models import Branch, ComboSequence, ComboStep, KengekiActivator, unchain_branch
 from parser import parse_file
 from visualizer import condition_text
 from ui.branch_dialog import BranchDialog
 from ui.lua_highlighter import LuaHighlighter
 from ui.step_dialog import StepDialog
+from ui.tree_delegate import StepDelegate
+
+
+def _parse_val(text: str):
+    """Int if the text looks like one, else the trimmed string (an expression)."""
+    text = text.strip()
+    try:
+        return int(text)
+    except ValueError:
+        return text
 
 TRIGGER_TYPES = ["act_entry", "special_effect", "kengeki_move"]
-
-
-def _step_label(step: ComboStep) -> str:
-    txt = f"[{step.anim_id} {step.goal_type}]  prio={step.priority} dist={step.distance}"
-    if step.extra_args:
-        txt += "  (" + ", ".join(str(a) for a in step.extra_args) + ")"
-    return txt
 
 
 def _index_of(lst, obj) -> int:
@@ -80,7 +86,10 @@ class MainWindow(QWidget):
                               trigger_id=50)
         self.combos = [first]      # every combo/activator held in memory
         self.seq = first           # the one being viewed/edited
+        self.loaded_path = None    # last .lua loaded, default write target
         self._syncing = False
+        self._building = False     # True while rebuilding the tree (ignore edits)
+        self._clipboard = None     # deepcopy of a copied step/branch
 
         self._build_ui()
         self._refresh_selector()
@@ -97,11 +106,14 @@ class MainWindow(QWidget):
         new_btn.clicked.connect(self._new_combo)
         load_btn = QPushButton("Load .lua…")
         load_btn.clicked.connect(self._load_file)
+        write_btn = QPushButton("Write to file…")
+        write_btn.clicked.connect(self._write_to_file)
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Combo:"))
         sel_row.addWidget(self.combo_selector, 1)
         sel_row.addWidget(new_btn)
         sel_row.addWidget(load_btn)
+        sel_row.addWidget(write_btn)
 
         # metadata form
         self.name_edit = QLineEdit()
@@ -117,14 +129,22 @@ class MainWindow(QWidget):
         form.addRow("Trigger type", self.trigger_type)
         form.addRow("Trigger id (Act# / effect id)", self.trigger_id)
 
-        # tree of steps + branches
+        # tree of steps + branches (multi-column, steps inline-editable)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Combo structure"])
-        self.tree.setColumnCount(1)
-        self.tree.doubleClicked.connect(lambda *_: self._edit_selected())
+        self.tree.setHeaderLabels(["Structure", "Anim", "Prio", "Dist", "Extra"])
+        self.tree.setColumnCount(5)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.setColumnWidth(0, 220)
+        self.tree.setItemDelegate(StepDelegate(self))
+        self.tree.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.AnyKeyPressed)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemDoubleClicked.connect(self._on_double_click)
 
         add_step_btn = QPushButton("Add step")
         add_branch_btn = QPushButton("Add branch")
+        add_elseif_btn = QPushButton("Add elseif")
         edit_btn = QPushButton("Edit")
         dup_btn = QPushButton("Duplicate")
         rm_btn = QPushButton("Remove")
@@ -132,17 +152,21 @@ class MainWindow(QWidget):
         down_btn = QPushButton("↓")
         add_step_btn.clicked.connect(self._add_step)
         add_branch_btn.clicked.connect(self._add_branch)
+        add_elseif_btn.clicked.connect(self._add_elseif)
         edit_btn.clicked.connect(self._edit_selected)
         dup_btn.clicked.connect(self._duplicate_selected)
         rm_btn.clicked.connect(self._remove_selected)
         up_btn.clicked.connect(lambda: self._move_selected(-1))
         down_btn.clicked.connect(lambda: self._move_selected(1))
         btn_row = QHBoxLayout()
-        for b in (add_step_btn, add_branch_btn, edit_btn, dup_btn, rm_btn, up_btn, down_btn):
+        for b in (add_step_btn, add_branch_btn, add_elseif_btn, edit_btn,
+                  dup_btn, rm_btn, up_btn, down_btn):
             btn_row.addWidget(b)
 
-        hint = QLabel("Select a branch's true/false node, then Add to nest inside it.")
+        hint = QLabel("Edit Anim/Prio/Dist inline (double-click or type; Enter → next). "
+                      "Select a branch → Add step/branch nests inside; Add elseif chains a condition.")
         hint.setStyleSheet("color: gray;")
+        hint.setWordWrap(True)
 
         left = QVBoxLayout()
         left.addLayout(sel_row)
@@ -178,9 +202,49 @@ class MainWindow(QWidget):
         splitter = QSplitter()
         splitter.addWidget(left_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([470, 570])
-        root = QHBoxLayout(self)
+        splitter.setSizes([560, 480])
+        root = QVBoxLayout(self)
+        root.setMenuBar(self._build_menu())
         root.addWidget(splitter)
+
+    def _build_menu(self) -> QMenuBar:
+        bar = QMenuBar(self)
+
+        def act(text, slot, shortcut=None):
+            a = QAction(text, self)
+            a.triggered.connect(slot)
+            if shortcut:
+                a.setShortcut(QKeySequence(shortcut))
+            self.addAction(a)   # activate the shortcut window-wide
+            return a
+
+        file_menu = bar.addMenu("File")
+        file_menu.addAction(act("New combo", self._new_combo, "Ctrl+N"))
+        file_menu.addAction(act("Load .lua…", self._load_file, "Ctrl+O"))
+        file_menu.addAction(act("Write to file…", self._write_to_file, "Ctrl+S"))
+        file_menu.addSeparator()
+        file_menu.addAction(act("Exit", self.close))
+
+        edit_menu = bar.addMenu("Edit")
+        edit_menu.addAction(act("Copy", self._copy_selected, "Ctrl+C"))
+        edit_menu.addAction(act("Paste", self._paste, "Ctrl+V"))
+        edit_menu.addAction(act("Duplicate", self._duplicate_selected, "Ctrl+D"))
+        edit_menu.addAction(act("Delete", self._remove_selected, "Del"))
+        edit_menu.addSeparator()
+        edit_menu.addAction(act("Add step", self._add_step))
+        edit_menu.addAction(act("Add branch", self._add_branch))
+        edit_menu.addAction(act("Add elseif", self._add_elseif))
+
+        help_menu = bar.addMenu("Help")
+        help_menu.addAction(act("About", self._about))
+        return bar
+
+    def _about(self):
+        QMessageBox.about(
+            self, "About HKS Lua Editor",
+            "HKS Lua Editor\n\nBuild, visualize and generate Sekiro enemy AI "
+            "combos (Act / Interrupt / Kengeki) as HKS Lua, and write them back "
+            "into a behavior .lua file.")
 
     # --- combo switching ---------------------------------------------------
 
@@ -306,10 +370,56 @@ class MainWindow(QWidget):
             return
         dlg = BranchDialog(self)
         if dlg.exec():
+            data = self._selected_payload()
             lst, idx = self._target_list_and_index()
             obj = dlg.result_branch()
+            # a branch added into an empty else slot becomes an elseif arm
+            if data and data["kind"] == "else" and len(lst) == 0:
+                obj.from_elseif = True
             lst.insert(idx, obj)
             self.refresh(select=obj)
+
+    def _add_elseif(self):
+        """Append an `elseif` arm to the selected branch's ladder."""
+        if not self._is_combo():
+            return
+        data = self._selected_payload()
+        if data is None or data["kind"] not in ("branch", "else"):
+            self.status.setStyleSheet("color: #c0392b;")
+            self.status.setText("Select an if/elseif arm (or its else) to add an elseif.")
+            return
+        cur = data["obj"]  # head arm (for else, the owning branch)
+        while (len(cur.false_branch) == 1 and isinstance(cur.false_branch[0], Branch)
+               and cur.false_branch[0].from_elseif):
+            cur = cur.false_branch[0]
+        if cur.false_branch:
+            QMessageBox.information(self, "Can't add elseif",
+                                    "This branch already has an else body — remove it "
+                                    "first (an elseif can't come after else).")
+            return
+        dlg = BranchDialog(self)
+        if dlg.exec():
+            new = dlg.result_branch()
+            new.from_elseif = True
+            cur.false_branch.append(new)
+            self.refresh(select=new)
+
+    # --- clipboard ---------------------------------------------------------
+
+    def _copy_selected(self):
+        data = self._selected_obj_data()
+        if data is not None:
+            self._clipboard = copy.deepcopy(data["obj"])
+            self.status.setStyleSheet("color: #27ae60;")
+            self.status.setText(f"Copied {type(data['obj']).__name__}.")
+
+    def _paste(self):
+        if self._clipboard is None or not self._is_combo():
+            return
+        lst, idx = self._target_list_and_index()
+        clone = copy.deepcopy(self._clipboard)
+        lst.insert(idx, clone)
+        self.refresh(select=clone)
 
     def _edit_selected(self):
         data = self._selected_obj_data()
@@ -358,6 +468,50 @@ class MainWindow(QWidget):
         lst[i], lst[j] = lst[j], lst[i]
         self.refresh(select=obj)
 
+    # --- inline editing ----------------------------------------------------
+
+    def _on_item_changed(self, item, column):
+        """Commit an inline cell edit back to the ComboStep."""
+        if self._building:
+            return
+        data = self._payload_of(item)
+        if not data or data["kind"] != "step":
+            return
+        step = data["obj"]
+        text = item.text(column)
+        if column == 0:
+            step.goal_type = text.strip()
+        elif column == 1:
+            step.anim_id = _parse_val(text)
+        elif column == 2:
+            step.priority = _parse_val(text)
+        elif column == 3:
+            step.distance = _parse_val(text)
+        elif column == 4:
+            step.extra_args = [_parse_val(p) for p in text.split(",") if p.strip()]
+        self._refresh_output()   # update Lua/diagram; keep tree/edit position
+
+    def _on_double_click(self, item, column):
+        # steps edit inline; a branch row opens the full condition dialog
+        data = self._payload_of(item)
+        if data and data["kind"] == "branch":
+            self._edit_selected()
+
+    def _edit_next_step_cell(self):
+        """Move to the same column of the next step row and start editing."""
+        col = self.tree.currentColumn()
+        cur = self.tree.currentItem()
+        if cur is None:
+            return
+        nxt = self.tree.itemBelow(cur)
+        while nxt is not None:
+            d = self._payload_of(nxt)
+            if d and d["kind"] == "step":
+                self.tree.setCurrentItem(nxt, col)
+                self.tree.editItem(nxt, col)
+                return
+            nxt = self.tree.itemBelow(nxt)
+
     # --- load from file ----------------------------------------------------
 
     def _load_file(self):
@@ -372,6 +526,7 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "Nothing parsed",
                                 "No combos or kengeki selector were found.")
             return
+        self.loaded_path = path
         self.combos.extend(items)
         self.seq = items[0]
         self._refresh_selector()
@@ -381,6 +536,34 @@ class MainWindow(QWidget):
         self.status.setText(f"Loaded {len(items)} items "
                             f"({len(result.warnings)} parse warnings).")
 
+    def _write_to_file(self):
+        # pick target: default the last-loaded file, else prompt
+        path = self.loaded_path
+        if not path or not os.path.exists(path):
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Choose .lua file to write into", "",
+                "Lua files (*.lua);;All files (*)")
+        if not path:
+            return
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        new_text, summary = writer.apply_sequence(text, self.seq)
+        if new_text == text:
+            QMessageBox.information(self, "Nothing written", "\n".join(summary)
+                                    or "No change was produced.")
+            return
+        ok = QMessageBox.question(
+            self, "Write to file",
+            f"Target:\n{path}\n\nChanges:\n  - " + "\n  - ".join(summary)
+            + "\n\nA backup (.bak) will be made. Proceed?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        backup = writer.write_file(path, new_text, backup=True)
+        self.status.setStyleSheet("color: #27ae60;")
+        self.status.setText(f"Wrote {os.path.basename(path)}"
+                            + (f" (backup: {os.path.basename(backup)})" if backup else ""))
+
     # --- refresh -----------------------------------------------------------
 
     def refresh(self, select=None):
@@ -388,13 +571,17 @@ class MainWindow(QWidget):
         self._refresh_output()
 
     def _rebuild_tree(self, select=None):
-        self.tree.clear()
-        self._payloads = []
-        if self._is_combo():
-            self._add_tree_items(self.seq.steps, self.tree.invisibleRootItem())
-            self.tree.expandAll()
-            if select is not None:
-                self._select_obj(select)
+        self._building = True
+        try:
+            self.tree.clear()
+            self._payloads = []
+            if self._is_combo():
+                self._add_tree_items(self.seq.steps, self.tree.invisibleRootItem())
+                self.tree.expandAll()
+                if select is not None:
+                    self._select_obj(select)
+        finally:
+            self._building = False
 
     def _store_payload(self, node, payload):
         token = len(self._payloads)
@@ -404,7 +591,10 @@ class MainWindow(QWidget):
     def _add_tree_items(self, items_list, parent):
         for obj in items_list:
             if isinstance(obj, ComboStep):
-                node = QTreeWidgetItem(parent, [_step_label(obj)])
+                extra = ", ".join(str(a) for a in obj.extra_args)
+                node = QTreeWidgetItem(parent, [obj.goal_type, str(obj.anim_id),
+                                                str(obj.priority), str(obj.distance), extra])
+                node.setFlags(node.flags() | Qt.ItemIsEditable)  # inline-editable
                 self._store_payload(node, {"kind": "step", "obj": obj, "list": items_list})
             elif isinstance(obj, Branch):
                 # ladder: render the if/elseif/else chain at this one level
@@ -414,11 +604,12 @@ class MainWindow(QWidget):
                     node = QTreeWidgetItem(parent, [f"{kw} {condition_text(arm)}"])
                     self._store_payload(node, {"kind": "branch", "obj": arm, "list": containing})
                     self._add_tree_items(arm.true_branch, node)  # body as children
-                if else_items:
-                    else_node = QTreeWidgetItem(parent, ["else"])
-                    else_node.setForeground(0, QColor("gray"))
-                    self._store_payload(else_node, {"kind": "else", "obj": obj, "list": else_items})
-                    self._add_tree_items(else_items, else_node)
+                # always render an else slot (even empty) so it is reachable:
+                # add a step -> else body; add a branch -> becomes an elseif.
+                else_node = QTreeWidgetItem(parent, ["else" if else_items else "else (empty)"])
+                else_node.setForeground(0, QColor("gray"))
+                self._store_payload(else_node, {"kind": "else", "obj": obj, "list": else_items})
+                self._add_tree_items(else_items, else_node)
 
     def _iter_tree_items(self, parent=None):
         parent = parent or self.tree.invisibleRootItem()

@@ -1,6 +1,9 @@
 """Tests for visualizer.py — ladder diagram output."""
 
-from models import Branch, ComboSequence, ComboStep
+from models import (
+    Branch, ComboSequence, ComboStep,
+    randam, state, ninsatsu, speffect,
+)
 from visualizer import visualize
 
 
@@ -23,7 +26,7 @@ def test_visualize_randam_ladder():
         name="kick", trigger_type="special_effect", trigger_id=5031,
         steps=[
             Branch(
-                kind="randam_percent", threshold=50,
+                terms=[randam(50)],
                 true_branch=[ComboStep("ComboFinal", 3049, 10)],
                 false_branch=[ComboStep("ComboFinal", 3041, 10)],
             ),
@@ -43,10 +46,10 @@ def test_visualize_elseif_chain_same_level():
         name="chain", trigger_type="act_entry", trigger_id=1,
         steps=[
             Branch(
-                kind="randam_percent", threshold=50,
+                terms=[randam(50)],
                 true_branch=[ComboStep("ComboFinal", 3001, 10)],
                 false_branch=[Branch(
-                    kind="randam_percent", threshold=33, from_elseif=True,
+                    terms=[randam(33)], from_elseif=True,
                     true_branch=[ComboStep("ComboFinal", 3002, 10)],
                     false_branch=[ComboStep("ComboFinal", 3003, 10)],
                 )],
@@ -67,10 +70,10 @@ def test_visualize_nested_else_if_stays_deeper():
         name="nested", trigger_type="act_entry", trigger_id=1,
         steps=[
             Branch(
-                kind="randam_percent", threshold=50,
+                terms=[randam(50)],
                 true_branch=[ComboStep("ComboFinal", 3001, 10)],
                 false_branch=[Branch(   # from_elseif defaults to False
-                    kind="randam_percent", threshold=33,
+                    terms=[randam(33)],
                     true_branch=[ComboStep("ComboFinal", 3002, 10)],
                     false_branch=[ComboStep("ComboFinal", 3003, 10)],
                 )],
@@ -90,12 +93,15 @@ def test_visualize_state_and_ninsatsu_labels():
     seq = ComboSequence(
         name="stateful", trigger_type="special_effect", trigger_id=3710071,
         steps=[
-            Branch(kind="state_check", state_index=12, state_value=0,
+            Branch(terms=[state(12, 0)],
                    true_branch=[ComboStep("ComboRepeat", 3006, 5)]),
-            Branch(kind="ninsatsu", operator="<=", threshold=1,
+            Branch(terms=[ninsatsu("<=", 1)],
                    true_branch=[ComboStep("ComboFinal", 3092, 10)]),
+            Branch(terms=[randam(50), speffect("TARGET_SELF", 200050)], connective="and",
+                   true_branch=[ComboStep("ComboFinal", 3010, 10)]),
         ],
     )
     out = visualize(seq)
     assert "if GetNumber(12) == 0" in out
     assert "if ninsatsu <= 1" in out
+    assert "if randam <= 50 and HasSpEffect(SELF, 200050)" in out

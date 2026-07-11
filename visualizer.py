@@ -23,17 +23,24 @@ from models import (
 INDENT = "    "  # 4 spaces per nesting level
 
 
+def _term_text(term) -> str:
+    if term.kind == "randam":
+        core = f"randam <= {term.threshold}"
+    elif term.kind == "state":
+        core = f"GetNumber({term.state_index}) == {term.state_value}"
+    elif term.kind == "ninsatsu":
+        core = f"ninsatsu {term.operator or '<='} {term.threshold}"
+    elif term.kind == "speffect":
+        tgt = "SELF" if term.target == "TARGET_SELF" else "ENE"
+        core = f"HasSpEffect({tgt}, {term.effect_id})"
+    else:
+        core = term.raw or "raw"
+    return f"not {core}" if term.negate else core
+
+
 def condition_text(branch: Branch) -> str:
-    """Human-readable condition for a branch's if/elseif."""
-    if branch.kind == "randam_percent":
-        return f"randam <= {branch.threshold}"
-    if branch.kind == "state_check":
-        return f"GetNumber({branch.state_index}) == {branch.state_value}"
-    if branch.kind == "ninsatsu":
-        return f"ninsatsu {branch.operator or '<='} {branch.threshold}"
-    if branch.kind == "raw":
-        return branch.raw_condition or "raw"
-    return branch.kind
+    """Human-readable condition for a branch's if/elseif (terms joined)."""
+    return f" {branch.connective} ".join(_term_text(t) for t in branch.terms)
 
 
 def _step_leaf(step: ComboStep) -> str:

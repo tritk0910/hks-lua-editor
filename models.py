@@ -33,31 +33,64 @@ class ComboStep:
 
 
 @dataclass
-class Branch:
-    """A split in the combo.
+class Term:
+    """One primitive condition. A Branch's condition is a list of these joined
+    by a connective (`and`/`or`).
 
     kind:
-      - "randam_percent": `arg0:GetRandam_Int(1,100) <= threshold` (the game
-        spells it "Randam"). `threshold` is the percent.
-      - "state_check": `arg1:GetNumber(state_index) == state_value`.
-      - "ninsatsu": `arg1:GetNinsatsuNum() <operator> threshold` — ninsatsu is
-        the boss's deathblow count / phase (e.g. `<= 1`, `>= 2`). `operator`
-        holds the comparison, `threshold` the value.
-      - "raw": `raw_condition` verbatim Lua.
-
-    `true_branch` / `false_branch` hold nested steps and branches, so combos
-    can nest arbitrarily deep.
+      - "randam":   `arg0:GetRandam_Int(1,100) <= threshold` (game spelling).
+      - "state":    `arg1:GetNumber(state_index) == state_value`.
+      - "ninsatsu": `arg1:GetNinsatsuNum() <operator> threshold` (deathblow
+        count / boss phase; e.g. `<= 1`, `>= 2`).
+      - "speffect": `arg1:HasSpecialEffectId(target, effect_id)` — whether
+        self/enemy currently has a special effect.
+      - "raw":      `raw` verbatim Lua.
+    `negate` prepends `not `.
     """
 
-    kind: str                       # "randam_percent" | "state_check" | "ninsatsu" | "raw"
-    threshold: int = 0              # percent (randam) or compare value (ninsatsu)
-    state_index: int | None = None  # for GetNumber(N) == value checks
+    kind: str                       # "randam" | "state" | "ninsatsu" | "speffect" | "raw"
+    negate: bool = False
+    threshold: int = 0              # randam percent, or ninsatsu compare value
+    operator: str = "<="            # ninsatsu comparison: <=, >=, ==, <, >
+    state_index: int | None = None
     state_value: int | None = None
-    operator: str | None = None     # comparison for ninsatsu: "<=", ">=", "==", "<", ">"
-    raw_condition: str | None = None  # verbatim Lua for kind == "raw"
-    from_elseif: bool = False       # True if this branch was reached via `elseif`
-                                    # (part of a ladder) rather than a nested
-                                    # `else { if }`. Display-only distinction.
+    target: str = "TARGET_ENE_0"    # speffect: TARGET_SELF | TARGET_ENE_0
+    effect_id: int | None = None    # speffect
+    raw: str | None = None          # kind == "raw"
+
+
+def randam(threshold: int, negate: bool = False) -> "Term":
+    return Term(kind="randam", negate=negate, threshold=threshold)
+
+
+def state(index: int, value: int, negate: bool = False) -> "Term":
+    return Term(kind="state", negate=negate, state_index=index, state_value=value)
+
+
+def ninsatsu(operator: str, value: int, negate: bool = False) -> "Term":
+    return Term(kind="ninsatsu", negate=negate, operator=operator, threshold=value)
+
+
+def speffect(target: str, effect_id: int, negate: bool = False) -> "Term":
+    return Term(kind="speffect", negate=negate, target=target, effect_id=effect_id)
+
+
+def raw(text: str, negate: bool = False) -> "Term":
+    return Term(kind="raw", negate=negate, raw=text)
+
+
+@dataclass
+class Branch:
+    """A split in the combo. Its condition is `terms` joined by `connective`.
+
+    `true_branch` / `false_branch` hold nested steps and branches, so combos
+    can nest arbitrarily deep. `from_elseif` marks a branch reached via a real
+    `elseif` (ladder) vs a nested `else { if }` (display-only distinction).
+    """
+
+    terms: list = field(default_factory=list)   # list[Term]
+    connective: str = "and"                      # "and" | "or"
+    from_elseif: bool = False
     true_branch: list = field(default_factory=list)   # list[ComboStep | Branch]
     false_branch: list = field(default_factory=list)
 

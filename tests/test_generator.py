@@ -1,6 +1,9 @@
 """Golden-string tests for generator.py, anchored to 710300_battle.lua."""
 
-from models import Branch, ComboSequence, ComboStep
+from models import (
+    Branch, ComboSequence, ComboStep,
+    randam, state, ninsatsu, speffect, raw,
+)
 from generator import (
     generate_act,
     generate_interrupt_branch,
@@ -54,7 +57,7 @@ def test_generate_act_random_branch():
         steps=[
             ComboStep("ComboAttackTunableSpin", 3004, 10, extra_args=[0, 0]),
             Branch(
-                kind="randam_percent", threshold=50,
+                terms=[randam(50)],
                 true_branch=[ComboStep("ComboRepeat", 3028, 10, extra_args=[0, 0])],
                 false_branch=[ComboStep("ComboRepeat", 3082, 10, extra_args=[0, 0])],
             ),
@@ -74,7 +77,7 @@ def test_generate_interrupt_branch_matches_5031():
         name="kick", trigger_type="special_effect", trigger_id=5031,
         steps=[
             Branch(
-                kind="randam_percent", threshold=50,
+                terms=[randam(50)],
                 true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])],
                 false_branch=[ComboStep("ComboFinal", 3041, 10, extra_args=[0])],
             ),
@@ -97,7 +100,7 @@ def test_state_check_branch():
         name="stateful", trigger_type="special_effect", trigger_id=3710071,
         steps=[
             Branch(
-                kind="state_check", threshold=0, state_index=12, state_value=0,
+                terms=[state(12, 0)],
                 true_branch=[ComboStep("ComboRepeat", 3006, 5, extra_args=[0])],
             ),
         ],
@@ -136,19 +139,68 @@ def test_ninsatsu_branch_condition():
     seq = ComboSequence(
         name="phase", trigger_type="act_entry", trigger_id=1,
         steps=[
-            Branch(kind="ninsatsu", operator="<=", threshold=1,
+            Branch(terms=[ninsatsu("<=", 1)],
                    true_branch=[ComboStep("ComboFinal", 3092, 10, extra_args=[0])]),
         ],
     )
     out = generate_act(seq)
-    assert "    if arg1:GetNinsatsuNum() <= 1 then" in out
+    assert "    if arg0:GetNinsatsuNum() <= 1 then" in out
+
+
+def test_speffect_and_compound_condition():
+    seq = ComboSequence(
+        name="cmp", trigger_type="act_entry", trigger_id=1,
+        steps=[
+            Branch(terms=[randam(50), speffect("TARGET_ENE_0", 110030)],
+                   connective="and",
+                   true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])]),
+        ],
+    )
+    out = generate_act(seq)
+    assert ("if arg0:GetRandam_Int(1, 100) <= 50 and "
+            "arg0:HasSpecialEffectId(TARGET_ENE_0, 110030) then") in out
+
+
+def test_negated_speffect():
+    seq = ComboSequence(
+        name="neg", trigger_type="act_entry", trigger_id=1,
+        steps=[
+            Branch(terms=[speffect("TARGET_SELF", 200004, negate=True)],
+                   true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])]),
+        ],
+    )
+    assert "if not arg0:HasSpecialEffectId(TARGET_SELF, 200004) then" in generate_act(seq)
+
+
+def test_value_receiver_convention():
+    from generator import generate_kengeki_move
+    terms = [state(0, 1), ninsatsu("<=", 1), speffect("TARGET_SELF", 200050)]
+    # Act & Kengeki-move read values via arg0
+    for gen, ttype in ((generate_act, "act_entry"), (generate_kengeki_move, "kengeki_move")):
+        seq = ComboSequence(name="x", trigger_type=ttype, trigger_id=1,
+                            steps=[Branch(terms=terms,
+                                          true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])])])
+        out = gen(seq)
+        assert "arg0:GetNumber(0) == 1" in out
+        assert "arg0:GetNinsatsuNum() <= 1" in out
+        assert "arg0:HasSpecialEffectId(TARGET_SELF, 200050)" in out
+        assert "arg1:AddSubGoal" in out           # step object is arg1
+    # Interrupt reads values via arg1, step object is arg2
+    iseq = ComboSequence(name="i", trigger_type="special_effect", trigger_id=5031,
+                         steps=[Branch(terms=terms,
+                                       true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])])])
+    iout = generate_interrupt_branch(iseq)
+    assert "arg1:GetNumber(0) == 1" in iout
+    assert "arg1:GetNinsatsuNum() <= 1" in iout
+    assert "arg1:HasSpecialEffectId(TARGET_SELF, 200050)" in iout
+    assert "arg2:AddSubGoal" in iout
 
 
 def test_raw_branch_condition():
     seq = ComboSequence(
         name="rawcond", trigger_type="act_entry", trigger_id=9,
         steps=[
-            Branch(kind="raw", raw_condition="getDist >= 4.5",
+            Branch(terms=[raw("getDist >= 4.5")],
                    true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])]),
         ],
     )

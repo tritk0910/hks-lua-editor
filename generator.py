@@ -69,26 +69,37 @@ def render_step(step: ComboStep, receiver: str, indent: str = "") -> str:
 
 # --- rendering a branch split ----------------------------------------------
 
-def _branch_condition(branch: Branch, ctx: str) -> str:
-    """The Lua boolean expression for a branch's `if`.
+def _value_receiver(ctx: str) -> str:
+    """Which arg reads params/values. Act & Kengeki-move use arg0 (arg1 is the
+    step object); Interrupt & Kengeki_Activate use arg1 (arg2 is the step)."""
+    return "arg0" if ctx == "act" else "arg1"
 
-    ctx is "act" or "interrupt" and only affects the random idiom:
-      - act:       arg0:GetRandam_Int(1, 100) <= N
-      - interrupt: randam <= N   (randam is a local in Goal.Interrupt)
-    state_check is the same in both contexts: arg1:GetNumber(idx) == value
-    """
-    if branch.kind == "randam_percent":
-        if ctx == "interrupt":
-            return f"randam <= {branch.threshold}"
-        return f"arg0:GetRandam_Int(1, 100) <= {branch.threshold}"
-    if branch.kind == "state_check":
-        return f"arg1:GetNumber({branch.state_index}) == {branch.state_value}"
-    if branch.kind == "ninsatsu":
-        op = branch.operator or "<="
-        return f"arg1:GetNinsatsuNum() {op} {branch.threshold}"
-    if branch.kind == "raw":
-        return branch.raw_condition
-    raise ValueError(f"unknown branch kind: {branch.kind!r}")
+
+def _term_lua(term, ctx: str) -> str:
+    """The Lua for a single condition Term. The value receiver depends on ctx
+    (see _value_receiver); randam in the interrupt uses the `randam` local."""
+    val = _value_receiver(ctx)
+    if term.kind == "randam":
+        core = (f"randam <= {term.threshold}" if ctx == "interrupt"
+                else f"{val}:GetRandam_Int(1, 100) <= {term.threshold}")
+    elif term.kind == "state":
+        core = f"{val}:GetNumber({term.state_index}) == {term.state_value}"
+    elif term.kind == "ninsatsu":
+        core = f"{val}:GetNinsatsuNum() {term.operator or '<='} {term.threshold}"
+    elif term.kind == "speffect":
+        core = f"{val}:HasSpecialEffectId({term.target}, {term.effect_id})"
+    elif term.kind == "raw":
+        core = term.raw or ""
+    else:
+        raise ValueError(f"unknown term kind: {term.kind!r}")
+    return f"not {core}" if term.negate else core
+
+
+def _branch_condition(branch: Branch, ctx: str) -> str:
+    """The Lua boolean expression for a branch's `if` — terms joined by the
+    branch connective (`and`/`or`)."""
+    parts = [_term_lua(t, ctx) for t in branch.terms]
+    return f" {branch.connective} ".join(parts)
 
 
 def render_items(items, receiver: str, ctx: str, indent: str = "") -> str:
@@ -188,7 +199,8 @@ def _render_kengeki_items(items, indent: str) -> str:
         if isinstance(item, KengekiWeight):
             lines.append(f"{indent}kengeki[{item.index}] = {item.value}")
         elif isinstance(item, Branch):
-            cond = _branch_condition(item, ctx="act")  # kengeki has no random idiom
+            # Kengeki_Activate reads values via arg1 (arg2 is the step object)
+            cond = _branch_condition(item, ctx="kengeki_activate")
             lines.append(f"{indent}if {cond} then")
             lines.append(_render_kengeki_items(item.true_branch, indent + INDENT))
             if item.false_branch:

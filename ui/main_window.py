@@ -73,7 +73,7 @@ def _combo_label(item) -> str:
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Sekiro Combo Builder")
+        self.setWindowTitle("HKS Lua Editor")
         self.resize(1040, 660)
 
         first = ComboSequence(name="my_combo", trigger_type="act_entry",

@@ -1,4 +1,4 @@
-"""Entry point for the Sekiro Combo Builder desktop app.
+"""Entry point for the HKS Lua Editor desktop app.
 
 Run:  python app.py
 
@@ -20,7 +20,7 @@ if sys.platform == "win32":
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "sekiro.combo.builder")
+            "hks.lua.editor")
     except Exception:
         pass
 

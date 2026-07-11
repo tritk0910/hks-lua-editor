@@ -77,12 +77,15 @@ def _branch_condition(branch: Branch, ctx: str) -> str:
       - interrupt: randam <= N   (randam is a local in Goal.Interrupt)
     state_check is the same in both contexts: arg1:GetNumber(idx) == value
     """
-    if branch.kind == "random_percent":
+    if branch.kind == "randam_percent":
         if ctx == "interrupt":
             return f"randam <= {branch.threshold}"
         return f"arg0:GetRandam_Int(1, 100) <= {branch.threshold}"
     if branch.kind == "state_check":
         return f"arg1:GetNumber({branch.state_index}) == {branch.state_value}"
+    if branch.kind == "ninsatsu":
+        op = branch.operator or "<="
+        return f"arg1:GetNinsatsuNum() {op} {branch.threshold}"
     if branch.kind == "raw":
         return branch.raw_condition
     raise ValueError(f"unknown branch kind: {branch.kind!r}")

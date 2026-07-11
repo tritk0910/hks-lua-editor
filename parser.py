@@ -174,17 +174,21 @@ def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
     if m:
         t = re.search(r"<=\s*(\d+)", cond)
         if t:
-            return Branch(kind="random_percent", threshold=int(t.group(1)))
+            return Branch(kind="randam_percent", threshold=int(t.group(1)))
     m = re.match(r"^randam\s*<=\s*(\d+)$", cond)
     if m:
-        return Branch(kind="random_percent", threshold=int(m.group(1)))
+        return Branch(kind="randam_percent", threshold=int(m.group(1)))
     m = re.match(r"^(local\d+)\s*<=\s*(\d+)$", cond)
     if m and isinstance(locals_.get(m.group(1)), dict):
-        return Branch(kind="random_percent", threshold=int(m.group(2)))
+        return Branch(kind="randam_percent", threshold=int(m.group(2)))
     m = re.match(r"^arg\d:GetNumber\((\d+)\)\s*==\s*(-?\d+)$", cond)
     if m:
         return Branch(kind="state_check", state_index=int(m.group(1)),
                       state_value=int(m.group(2)))
+    # ninsatsu (deathblow count / phase): inline call or the `ninsatsu` local
+    m = re.match(r"^(?:arg\d:GetNinsatsuNum\(\)|ninsatsu)\s*(<=|>=|==|<|>)\s*(\d+)$", cond)
+    if m:
+        return Branch(kind="ninsatsu", operator=m.group(1), threshold=int(m.group(2)))
     warnings.append(f"un-modelled condition kept raw: {cond}")
     return Branch(kind="raw", raw_condition=cond)
 
@@ -243,6 +247,7 @@ def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_add
     kw = "elseif " if _from_elseif else "if "
     cond = line[len(kw):-len(" then")].strip()
     branch = _classify_condition(cond, locals_, warnings)
+    branch.from_elseif = _from_elseif   # distinguishes real elseif from else{if}
     true_items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings, leaf=leaf)
     branch.true_branch = true_items
     false_items = []

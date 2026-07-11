@@ -54,7 +54,7 @@ def test_generate_act_random_branch():
         steps=[
             ComboStep("ComboAttackTunableSpin", 3004, 10, extra_args=[0, 0]),
             Branch(
-                kind="random_percent", threshold=50,
+                kind="randam_percent", threshold=50,
                 true_branch=[ComboStep("ComboRepeat", 3028, 10, extra_args=[0, 0])],
                 false_branch=[ComboStep("ComboRepeat", 3082, 10, extra_args=[0, 0])],
             ),
@@ -74,7 +74,7 @@ def test_generate_interrupt_branch_matches_5031():
         name="kick", trigger_type="special_effect", trigger_id=5031,
         steps=[
             Branch(
-                kind="random_percent", threshold=50,
+                kind="randam_percent", threshold=50,
                 true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])],
                 false_branch=[ComboStep("ComboFinal", 3041, 10, extra_args=[0])],
             ),
@@ -130,6 +130,18 @@ def test_distance_expression_and_approach():
     assert "    Approach_Act_Flex(arg0, arg1, 100, 0, 3.6 - arg0:GetMapHitRadius(TARGET_SELF))" in out
     assert ("    arg1:AddSubGoal(GOAL_COMMON_ComboAttackTunableSpin, 10, 3000, "
             "TARGET_ENE_0, 3.5 - arg0:GetMapHitRadius(TARGET_SELF), 0, 0)") in out
+
+
+def test_ninsatsu_branch_condition():
+    seq = ComboSequence(
+        name="phase", trigger_type="act_entry", trigger_id=1,
+        steps=[
+            Branch(kind="ninsatsu", operator="<=", threshold=1,
+                   true_branch=[ComboStep("ComboFinal", 3092, 10, extra_args=[0])]),
+        ],
+    )
+    out = generate_act(seq)
+    assert "    if arg1:GetNinsatsuNum() <= 1 then" in out
 
 
 def test_raw_branch_condition():

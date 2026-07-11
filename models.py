@@ -34,18 +34,30 @@ class ComboStep:
 
 @dataclass
 class Branch:
-    """A split in the combo: a random-percent roll, a state check, or a raw
-    (un-modelled) Lua condition preserved verbatim.
+    """A split in the combo.
+
+    kind:
+      - "randam_percent": `arg0:GetRandam_Int(1,100) <= threshold` (the game
+        spells it "Randam"). `threshold` is the percent.
+      - "state_check": `arg1:GetNumber(state_index) == state_value`.
+      - "ninsatsu": `arg1:GetNinsatsuNum() <operator> threshold` — ninsatsu is
+        the boss's deathblow count / phase (e.g. `<= 1`, `>= 2`). `operator`
+        holds the comparison, `threshold` the value.
+      - "raw": `raw_condition` verbatim Lua.
 
     `true_branch` / `false_branch` hold nested steps and branches, so combos
     can nest arbitrarily deep.
     """
 
-    kind: str                       # "random_percent" | "state_check" | "raw"
-    threshold: int = 0              # e.g. 50, for random_percent
+    kind: str                       # "randam_percent" | "state_check" | "ninsatsu" | "raw"
+    threshold: int = 0              # percent (randam) or compare value (ninsatsu)
     state_index: int | None = None  # for GetNumber(N) == value checks
     state_value: int | None = None
+    operator: str | None = None     # comparison for ninsatsu: "<=", ">=", "==", "<", ">"
     raw_condition: str | None = None  # verbatim Lua for kind == "raw"
+    from_elseif: bool = False       # True if this branch was reached via `elseif`
+                                    # (part of a ladder) rather than a nested
+                                    # `else { if }`. Display-only distinction.
     true_branch: list = field(default_factory=list)   # list[ComboStep | Branch]
     false_branch: list = field(default_factory=list)
 
@@ -91,3 +103,26 @@ class KengekiActivator:
     """The whole Goal.Kengeki_Activate selector: an ordered if/elseif chain."""
 
     blocks: list = field(default_factory=list)  # list[KengekiEffectBlock]
+
+
+def unchain_branch(branch: Branch, parent_list: list):
+    """Flatten an if/elseif/else chain for display (ladder view).
+
+    A chain `if A then .. else (if B then .. else ..)` is stored as
+    `Branch(A, false=[Branch(B, ...)])`. This walks that nesting and returns:
+      - arms: list of (arm_branch, containing_list) — one per if/elseif
+      - else_items: the final else body (may be empty)
+    so the whole ladder can be rendered at one indent level. Only a
+    false_branch that is EXACTLY one Branch flagged `from_elseif` is treated as
+    an elseif continuation. A nested `else { if ... }` (from_elseif == False)
+    is NOT flattened — it stays as an else body one level deeper, matching how
+    the source actually nested it.
+    """
+    arms = [(branch, parent_list)]
+    cur = branch
+    while (len(cur.false_branch) == 1
+           and isinstance(cur.false_branch[0], Branch)
+           and cur.false_branch[0].from_elseif):
+        arms.append((cur.false_branch[0], cur.false_branch))
+        cur = cur.false_branch[0]
+    return arms, cur.false_branch

@@ -57,8 +57,37 @@ class ComboSequence:
     """
 
     name: str            # user-given label, for the tool's own reference
-    trigger_type: str    # "special_effect" | "act_entry"
-    trigger_id: int      # special effect ID, or Act number
+    trigger_type: str    # "special_effect" | "act_entry" | "kengeki_move"
+    trigger_id: int      # special effect ID, Act number, or Kengeki move number
     steps: list = field(default_factory=list)  # list[ComboStep | Branch], in order
     approach: list | None = None  # 7 Approach_Act_Flex params (local0..local6),
                                   # int or resolved expression string; None if absent
+
+
+# --- Kengeki (sword-clash) selector: Goal.Kengeki_Activate ------------------
+# A different structure from combos: instead of AddSubGoal chains, it assigns
+# weights `kengeki[index] = value` under a condition tree, keyed by the value
+# of `ReturnKengekiSpecialEffect`. The condition tree reuses `Branch` (its
+# true/false lists then hold KengekiWeight leaves instead of ComboStep).
+
+@dataclass
+class KengekiWeight:
+    """One `kengeki[index] = value` assignment (a move's selection weight)."""
+
+    index: int
+    value: int | str
+
+
+@dataclass
+class KengekiEffectBlock:
+    """One `local0 == <effect_id>` branch of Goal.Kengeki_Activate."""
+
+    effect_id: int       # e.g. 200200 — a ReturnKengekiSpecialEffect value
+    items: list = field(default_factory=list)  # list[KengekiWeight | Branch]
+
+
+@dataclass
+class KengekiActivator:
+    """The whole Goal.Kengeki_Activate selector: an ordered if/elseif chain."""
+
+    blocks: list = field(default_factory=list)  # list[KengekiEffectBlock]

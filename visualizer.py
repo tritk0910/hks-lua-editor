@@ -12,7 +12,13 @@ each indented one level under the diamond.
 
 from __future__ import annotations
 
-from models import Branch, ComboSequence, ComboStep
+from models import (
+    Branch,
+    ComboSequence,
+    ComboStep,
+    KengekiActivator,
+    KengekiWeight,
+)
 
 INDENT = "  "  # 2 spaces per nesting level, kept tight for readability
 
@@ -23,6 +29,8 @@ def _branch_label(branch: Branch) -> str:
         return f"random {branch.threshold}%"
     if branch.kind == "state_check":
         return f"GetNumber({branch.state_index}) == {branch.state_value}"
+    if branch.kind == "raw":
+        return branch.raw_condition or "raw"
     return branch.kind
 
 
@@ -58,8 +66,37 @@ def visualize(seq: ComboSequence) -> str:
     """Return an indented text diagram of the whole combo."""
     if seq.trigger_type == "act_entry":
         trigger = f"Act{seq.trigger_id:02d}"
+    elif seq.trigger_type == "kengeki_move":
+        trigger = f"Kengeki{seq.trigger_id:02d}"
     else:
         trigger = f"SpecialEffect {seq.trigger_id}"
     lines = [f"{seq.name}  ({trigger})", "  |"]
     _render_items(seq.steps, depth=0, lines=lines)
+    return "\n".join(lines)
+
+
+def _render_kengeki_nodes(items, depth: int, lines: list[str]) -> None:
+    pad = INDENT * depth
+    for item in items:
+        if isinstance(item, KengekiWeight):
+            lines.append(f"{pad}[kengeki {item.index} = {item.value}]")
+        elif isinstance(item, Branch):
+            true_lbl, false_lbl = _true_false_labels(item)
+            lines.append(f"{pad}<{_branch_label(item)}>")
+            lines.append(f"{pad}|-- {true_lbl}:")
+            _render_kengeki_nodes(item.true_branch, depth + 1, lines)
+            if item.false_branch:
+                lines.append(f"{pad}`-- {false_lbl}:")
+                _render_kengeki_nodes(item.false_branch, depth + 1, lines)
+        else:
+            raise TypeError(f"kengeki item must be KengekiWeight or Branch, got {type(item)!r}")
+
+
+def visualize_kengeki(activator: KengekiActivator) -> str:
+    """Text diagram of a Kengeki_Activate selector: each effect block lists its
+    weighted moves and any gating branches."""
+    lines = ["Kengeki_Activate"]
+    for block in activator.blocks:
+        lines.append(f"  effect {block.effect_id}:")
+        _render_kengeki_nodes(block.items, depth=2, lines=lines)
     return "\n".join(lines)

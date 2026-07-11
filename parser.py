@@ -14,12 +14,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from models import Branch, ComboSequence, ComboStep
+from models import (
+    Branch,
+    ComboSequence,
+    ComboStep,
+    KengekiActivator,
+    KengekiEffectBlock,
+    KengekiWeight,
+)
 
 
 @dataclass
 class ParseResult:
     sequences: list = field(default_factory=list)   # list[ComboSequence]
+    activators: list = field(default_factory=list)  # list[KengekiActivator]
     warnings: list = field(default_factory=list)    # list[str]
 
 
@@ -181,11 +189,28 @@ def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
     return Branch(kind="raw", raw_condition=cond)
 
 
-def _parse_block(lines, i, base_indent, locals_, warnings):
-    """Recursively parse a list of logical lines into list[ComboStep | Branch].
+def _addsubgoal_leaf(text, locals_, warnings):
+    """Default leaf parser: an `argX:AddSubGoal(...)` line -> ComboStep."""
+    if "AddSubGoal(" in text:
+        return _parse_addsubgoal(text, locals_, warnings)
+    return None
 
-    Returns (items, next_index). Stops at a dedent below base_indent or at an
-    enclosing `else` / `elseif` / `end`.
+
+def _kengeki_leaf(text, locals_, warnings):
+    """Leaf parser for Kengeki_Activate: `kengeki[index] = value` -> KengekiWeight."""
+    m = re.match(r"^kengeki\[(\d+)\]\s*=\s*(.+)$", text)
+    if m:
+        return KengekiWeight(index=int(m.group(1)),
+                             value=_resolve(m.group(2), locals_))
+    return None
+
+
+def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf):
+    """Recursively parse logical lines into list[<leaf> | Branch].
+
+    `leaf(text, locals_, warnings)` returns a leaf item for a recognised
+    statement line, else None. Returns (items, next_index). Stops at a dedent
+    below base_indent or at an enclosing `else` / `elseif` / `end`.
     """
     items = []
     while i < len(lines):
@@ -196,38 +221,40 @@ def _parse_block(lines, i, base_indent, locals_, warnings):
         if head in ("else", "elseif", "end"):
             break
         if text.startswith("if ") and text.endswith(" then"):
-            branch, i = _parse_if(lines, i, indent, locals_, warnings)
+            branch, i = _parse_if(lines, i, indent, locals_, warnings, leaf=leaf)
             if branch is not None:
                 items.append(branch)
             continue
-        if "AddSubGoal(" in text:
-            items.append(_parse_addsubgoal(text, locals_, warnings))
+        item = leaf(text, locals_, warnings)
+        if item is not None:
+            items.append(item)
         i += 1
     return items, i
 
 
-def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False):
+def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_addsubgoal_leaf):
     """Parse `if <cond> then ... [elseif/else ...] end` at `indent`.
 
     Returns (Branch | None, next_index). An `if/elseif` chain becomes nested
     Branches down the false side. Returns None (and warns) for an `if` that
-    contains no combo steps — e.g. Act23's param-computing ifs.
+    contains no leaf items — e.g. Act23's param-computing ifs.
     """
     line = lines[i][1]
     kw = "elseif " if _from_elseif else "if "
     cond = line[len(kw):-len(" then")].strip()
     branch = _classify_condition(cond, locals_, warnings)
-    true_items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings)
+    true_items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings, leaf=leaf)
     branch.true_branch = true_items
     false_items = []
     if j < len(lines) and lines[j][0] == indent:
         nxt = lines[j][1]
         if nxt.startswith("elseif ") and nxt.endswith(" then"):
-            nested, j = _parse_if(lines, j, indent, locals_, warnings, _from_elseif=True)
+            nested, j = _parse_if(lines, j, indent, locals_, warnings,
+                                  _from_elseif=True, leaf=leaf)
             if nested is not None:
                 false_items = [nested]
         elif nxt.split(None, 1)[0] == "else":
-            false_items, j = _parse_block(lines, j + 1, indent + 4, locals_, warnings)
+            false_items, j = _parse_block(lines, j + 1, indent + 4, locals_, warnings, leaf=leaf)
     if not _from_elseif:
         if j < len(lines) and lines[j][0] == indent and lines[j][1].strip() == "end":
             j += 1
@@ -260,6 +287,17 @@ def _parse_approach(lines, locals_):
     return None
 
 
+def _parse_kengeki_move(name: str, body: str, warnings: list) -> ComboSequence:
+    """Parse a `Goal.KengekiNN` move — like an Act but no approach, and the
+    leading `arg1:ClearSubGoal()` is simply skipped as a non-combo statement."""
+    num = int(re.match(r"Kengeki(\d+)", name).group(1))
+    lines = _logical_lines(body)[1:]   # drop the header line
+    locals_ = _build_local_table(lines)
+    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=warnings)
+    return ComboSequence(name=name, trigger_type="kengeki_move", trigger_id=num,
+                         steps=steps)
+
+
 def _parse_act(name: str, body: str, warnings: list) -> ComboSequence:
     num = int(re.match(r"Act(\d+)", name).group(1))
     lines = _logical_lines(body)[1:]   # drop the `Goal.ActNN = function(...)` header
@@ -268,6 +306,30 @@ def _parse_act(name: str, body: str, warnings: list) -> ComboSequence:
     steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=warnings)
     return ComboSequence(name=name, trigger_type="act_entry", trigger_id=num,
                          steps=steps, approach=approach)
+
+
+def _parse_kengeki_activate(body: str, warnings: list) -> KengekiActivator:
+    """Parse the `if/elseif local0 == <effect_id> then` chain of
+    Goal.Kengeki_Activate into a KengekiActivator. The `== 0` guard block and
+    the trailing REGIST_FUNC / Common_Kengeki_Activate boilerplate are ignored.
+    """
+    lines = _logical_lines(body)[1:]   # drop the header line
+    locals_ = _build_local_table(lines)
+    activator = KengekiActivator()
+    i = 0
+    while i < len(lines):
+        indent, text = lines[i]
+        m = re.match(r"^(?:if|elseif) local0 == (\d+) then$", text)
+        if not m:
+            i += 1
+            continue
+        eid = int(m.group(1))
+        items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings,
+                                leaf=_kengeki_leaf)
+        if eid != 0:   # `== 0` is the "no kengeki effect" guard, not a block
+            activator.blocks.append(KengekiEffectBlock(effect_id=eid, items=items))
+        i = j
+    return activator
 
 
 def _parse_interrupt(body: str, warnings: list) -> list:
@@ -304,6 +366,10 @@ def parse_file(text: str) -> ParseResult:
     for name, body in _iter_functions(text):
         if re.match(r"Act\d+$", name):
             result.sequences.append(_parse_act(name, body, result.warnings))
+        elif re.match(r"Kengeki\d+$", name):
+            result.sequences.append(_parse_kengeki_move(name, body, result.warnings))
+        elif name == "Kengeki_Activate":
+            result.activators.append(_parse_kengeki_activate(body, result.warnings))
         elif name == "Interrupt":
             result.sequences.extend(_parse_interrupt(body, result.warnings))
     return result

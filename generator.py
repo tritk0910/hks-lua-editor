@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import re
 
-from models import Branch, ComboSequence, ComboStep
+from models import (
+    Branch,
+    ComboSequence,
+    ComboStep,
+    KengekiActivator,
+    KengekiWeight,
+)
 
 INDENT = "    "  # 4 spaces, matching the reference file
 
@@ -147,6 +153,62 @@ def generate_interrupt_branch(seq: ComboSequence) -> str:
         f"{inner}arg2:ClearSubGoal()\n"
         f"{body}"
     )
+
+
+def generate_kengeki_move(seq: ComboSequence) -> str:
+    """A complete `Goal.KengekiNN` move function for a kengeki_move combo.
+
+    Structurally like an Act combo but: starts with `arg1:ClearSubGoal()`,
+    uses the arg1 receiver, and has NO `GetWellSpace_Odds` wrapper. NN is
+    zero-padded from seq.trigger_id (Kengeki01, Kengeki43, ...). See
+    710300_battle.lua line 1573 (Goal.Kengeki01).
+    """
+    if seq.trigger_type != "kengeki_move":
+        raise ValueError("generate_kengeki_move expects trigger_type == 'kengeki_move'")
+    name = f"Goal.Kengeki{seq.trigger_id:02d}"
+    body = render_items(seq.steps, receiver="arg1", ctx="act", indent=INDENT)
+    return (
+        f"{name} = function(arg0, arg1, arg2)\n"
+        f"{INDENT}arg1:ClearSubGoal()\n"
+        f"{body}\n"
+        f"end"
+    )
+
+
+# --- Kengeki_Activate selector --------------------------------------------
+
+def _render_kengeki_items(items, indent: str) -> str:
+    """Render list[KengekiWeight | Branch] into Lua lines (mirrors render_items
+    but the leaves are `kengeki[index] = value` assignments)."""
+    lines = []
+    for item in items:
+        if isinstance(item, KengekiWeight):
+            lines.append(f"{indent}kengeki[{item.index}] = {item.value}")
+        elif isinstance(item, Branch):
+            cond = _branch_condition(item, ctx="act")  # kengeki has no random idiom
+            lines.append(f"{indent}if {cond} then")
+            lines.append(_render_kengeki_items(item.true_branch, indent + INDENT))
+            if item.false_branch:
+                lines.append(f"{indent}else")
+                lines.append(_render_kengeki_items(item.false_branch, indent + INDENT))
+            lines.append(f"{indent}end")
+        else:
+            raise TypeError(f"kengeki item must be KengekiWeight or Branch, got {type(item)!r}")
+    return "\n".join(lines)
+
+
+def generate_kengeki_activate(activator: KengekiActivator) -> str:
+    """The core `if/elseif local0 == <effect_id> then ... end` selector chain
+    of Goal.Kengeki_Activate. Emits just the chain (the surrounding preamble
+    and REGIST_FUNC tail are boilerplate the user keeps)."""
+    parts = []
+    for idx, block in enumerate(activator.blocks):
+        kw = "if" if idx == 0 else "elseif"
+        body = _render_kengeki_items(block.items, INDENT)
+        parts.append(f"{kw} local0 == {block.effect_id} then\n{body}")
+    if not parts:
+        return ""
+    return "\n".join(parts) + "\nend"
 
 
 # --- special-effect registration ------------------------------------------

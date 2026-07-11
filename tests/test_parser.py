@@ -87,3 +87,70 @@ def test_interrupt_3710071_chained_timing_warns(parsed):
 def test_act23_param_if_skipped_with_warning(parsed):
     _act(parsed, 23)  # must exist and not crash
     assert any("skipped non-combo if" in w for w in parsed.warnings)
+
+
+def _kengeki(parsed, num):
+    for seq in parsed.sequences:
+        if seq.trigger_type == "kengeki_move" and seq.trigger_id == num:
+            return seq
+    raise AssertionError(f"Kengeki{num:02d} not found")
+
+
+def test_kengeki01_roundtrip(parsed):
+    from generator import generate_kengeki_move
+    seq = _kengeki(parsed, 1)
+    expected = (
+        "Goal.Kengeki01 = function(arg0, arg1, arg2)\n"
+        "    arg1:ClearSubGoal()\n"
+        "    arg1:AddSubGoal(GOAL_COMMON_ComboFinal, 10, 3050, TARGET_ENE_0, 9999, 0, 0)\n"
+        "end"
+    )
+    assert generate_kengeki_move(seq) == expected
+
+
+def test_kengeki02_chained_timing(parsed):
+    seq = _kengeki(parsed, 2)
+    assert seq.steps  # parsed at least one AddSubGoal
+    assert any("chained call after AddSubGoal" in w for w in parsed.warnings)
+
+
+# --- Slice 3b: Kengeki_Activate selector ----------------------------------
+
+def _block(parsed, eid):
+    assert len(parsed.activators) == 1
+    for b in parsed.activators[0].blocks:
+        if b.effect_id == eid:
+            return b
+    raise AssertionError(f"kengeki effect block {eid} not found")
+
+
+def test_activator_parsed_once(parsed):
+    assert len(parsed.activators) == 1
+    eids = {b.effect_id for b in parsed.activators[0].blocks}
+    # 0 (guard) must be excluded; the real effect ids present
+    assert 0 not in eids
+    assert {200200, 200201, 200210, 200211}.issubset(eids)
+
+
+def test_flat_block_200210_weights(parsed):
+    from models import KengekiWeight
+    block = _block(parsed, 200210)
+    weights = {w.index: w.value for w in block.items if isinstance(w, KengekiWeight)}
+    assert weights == {17: 100, 23: 100, 41: 50, 31: 50, 33: 100, 36: 100}
+
+
+def test_nested_block_200200_has_branch(parsed):
+    from models import Branch, KengekiWeight
+    block = _block(parsed, 200200)
+    kinds = [type(x).__name__ for x in block.items]
+    assert "Branch" in kinds  # distance/GetNumber gating present
+
+
+def test_generate_kengeki_activate_roundtrip_flat(parsed):
+    from generator import generate_kengeki_activate
+    from models import KengekiActivator, KengekiEffectBlock
+    block = _block(parsed, 200210)
+    lua = generate_kengeki_activate(KengekiActivator(blocks=[block]))
+    assert lua.startswith("if local0 == 200210 then")
+    assert "    kengeki[17] = 100" in lua
+    assert lua.endswith("end")

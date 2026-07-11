@@ -8,16 +8,19 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from models import Branch, Term
+from models import BoolNode, Branch, Term
 
 TERM_KINDS = ["randam", "state", "ninsatsu", "speffect", "raw"]
 NINSATSU_OPS = ["<=", ">=", "==", "<", ">"]
@@ -29,6 +32,9 @@ class TermRow(QWidget):
 
     def __init__(self, term: Term | None = None, on_remove=None):
         super().__init__()
+        # hug our content vertically so a lone term doesn't stretch to fill the
+        # scroll area (the max-height look in the old dialog)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
 
@@ -115,56 +121,108 @@ class TermRow(QWidget):
         return t
 
 
+class GroupWidget(QFrame):
+    """A boolean group: a connective (and/or) + optional `not`, holding a mixed
+    list of TermRow and nested GroupWidget children. Recurses for `(A or B) and C`."""
+
+    def __init__(self, op="and", items=None, negate=False, on_remove=None, root=False):
+        super().__init__()
+        if not root:
+            self.setFrameShape(QFrame.StyledPanel)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self._children = []   # list[TermRow | GroupWidget]
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 4, 6, 4)
+        header = QHBoxLayout()
+        self.op = QComboBox(); self.op.addItems(["and", "or"]); self.op.setCurrentText(op)
+        self.negate = QCheckBox("not")
+        self.negate.setChecked(negate)
+        add_term_btn = QPushButton("+ term"); add_term_btn.clicked.connect(lambda: self.add_term())
+        add_group_btn = QPushButton("+ group"); add_group_btn.clicked.connect(lambda: self.add_group())
+        header.addWidget(QLabel("Group:" if not root else "Match all/any:"))
+        header.addWidget(self.op)
+        header.addWidget(self.negate)
+        header.addWidget(add_term_btn)
+        header.addWidget(add_group_btn)
+        header.addStretch(1)
+        if not root:
+            # far-right ✕, consistent with each TermRow's remove button
+            rm = QPushButton("✕"); rm.setFixedWidth(28)
+            if on_remove:
+                rm.clicked.connect(lambda: on_remove(self))
+            header.addWidget(rm)
+        outer.addLayout(header)
+
+        self._box = QVBoxLayout()
+        self._box.setContentsMargins(18, 2, 0, 0)   # indent children
+        self._box.setSpacing(4)
+        outer.addLayout(self._box)
+        if root:
+            outer.addStretch(1)   # keep rows packed at the top
+
+        if items:
+            for it in items:
+                if isinstance(it, BoolNode):
+                    self.add_group(it)
+                else:
+                    self.add_term(it)
+        elif root:
+            self.add_term()
+
+    def add_term(self, term: Term | None = None):
+        row = TermRow(term, on_remove=self._remove_child)
+        self._children.append(row)
+        self._box.addWidget(row)
+
+    def add_group(self, node: BoolNode | None = None):
+        g = GroupWidget(op=node.op if node else "and",
+                        items=node.terms if node else None,
+                        negate=node.negate if node else False,
+                        on_remove=self._remove_child)
+        self._children.append(g)
+        self._box.addWidget(g)
+
+    def _remove_child(self, w):
+        if w in self._children:
+            self._children.remove(w)
+            w.setParent(None)
+
+    def to_items(self):
+        return [c.to_term() if isinstance(c, TermRow) else c.to_node()
+                for c in self._children]
+
+    def to_node(self) -> BoolNode:
+        return BoolNode(op=self.op.currentText(), terms=self.to_items(),
+                        negate=self.negate.isChecked())
+
+
 class BranchDialog(QDialog):
     def __init__(self, parent=None, branch: Branch | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit branch" if branch else "Add branch")
-        self.resize(560, 240)
+        self.resize(680, 320)
         self._existing = branch
 
+        self.root = GroupWidget(op=branch.connective if branch else "and",
+                                items=branch.terms if branch else None, root=True)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(self.root)
+
         outer = QVBoxLayout(self)
-        conn_row = QHBoxLayout()
-        conn_row.addWidget(QLabel("Join terms with:"))
-        self.connective = QComboBox(); self.connective.addItems(["and", "or"])
-        conn_row.addWidget(self.connective)
-        conn_row.addStretch(1)
-        add_btn = QPushButton("Add term")
-        add_btn.clicked.connect(lambda: self._add_row())
-        conn_row.addWidget(add_btn)
-        outer.addLayout(conn_row)
-
-        self._rows_box = QVBoxLayout()
-        outer.addLayout(self._rows_box)
-        outer.addStretch(1)
-
-        self._rows: list[TermRow] = []
-        if branch and branch.terms:
-            self.connective.setCurrentText(branch.connective)
-            for t in branch.terms:
-                self._add_row(t)
-        else:
-            self._add_row()  # start with one empty term
-
+        outer.addWidget(scroll, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
-    def _add_row(self, term: Term | None = None):
-        row = TermRow(term, on_remove=self._remove_row)
-        self._rows.append(row)
-        self._rows_box.addWidget(row)
-
-    def _remove_row(self, row: TermRow):
-        if len(self._rows) <= 1:
-            return  # always keep at least one term
-        self._rows.remove(row)
-        row.setParent(None)
-
     def result_branch(self) -> Branch:
-        terms = [r.to_term() for r in self._rows]
+        op = self.root.op.currentText()
+        terms = self.root.to_items()
+        if self.root.negate.isChecked():
+            terms = [BoolNode(op=op, terms=terms, negate=True)]
+            op = "and"
         true_b = self._existing.true_branch if self._existing else []
         false_b = self._existing.false_branch if self._existing else []
         from_elseif = self._existing.from_elseif if self._existing else False
-        return Branch(terms=terms, connective=self.connective.currentText(),
+        return Branch(terms=terms, connective=op,
                       from_elseif=from_elseif, true_branch=true_b, false_branch=false_b)

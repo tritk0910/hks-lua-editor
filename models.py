@@ -59,6 +59,27 @@ class Term:
     raw: str | None = None          # kind == "raw"
 
 
+@dataclass
+class BoolNode:
+    """A parenthesised sub-group of a condition: `(child <op> child ...)`.
+
+    A `Branch.terms` list holds `Term | BoolNode` joined by `Branch.connective`;
+    a BoolNode nests further with its own `op`, enabling `(A or B) and C`.
+    """
+
+    op: str                                       # "and" | "or"
+    terms: list = field(default_factory=list)     # list[Term | BoolNode]
+    negate: bool = False                          # `not (...)`
+
+
+def and_(*terms) -> "BoolNode":
+    return BoolNode(op="and", terms=list(terms))
+
+
+def or_(*terms) -> "BoolNode":
+    return BoolNode(op="or", terms=list(terms))
+
+
 def randam(threshold: int, negate: bool = False) -> "Term":
     return Term(kind="randam", negate=negate, threshold=threshold)
 

@@ -2,7 +2,7 @@
 
 from models import (
     Branch, ComboSequence, ComboStep,
-    randam, state, ninsatsu, speffect, raw,
+    randam, state, ninsatsu, speffect, raw, and_, or_,
 )
 from generator import (
     generate_act,
@@ -135,6 +135,43 @@ def test_distance_expression_and_approach():
             "TARGET_ENE_0, 3.5 - arg0:GetMapHitRadius(TARGET_SELF), 0, 0)") in out
 
 
+def test_elseif_chain_emits_elseif_keyword():
+    # from_elseif chain must render as `elseif`, not nested `else / if`
+    seq = ComboSequence(
+        name="ladder", trigger_type="act_entry", trigger_id=1,
+        steps=[Branch(
+            terms=[randam(50)],
+            true_branch=[ComboStep("ComboFinal", 3001, 10, extra_args=[0])],
+            false_branch=[Branch(
+                terms=[randam(33)], from_elseif=True,
+                true_branch=[ComboStep("ComboFinal", 3002, 10, extra_args=[0])],
+                false_branch=[ComboStep("ComboFinal", 3003, 10, extra_args=[0])])])],
+    )
+    out = generate_act(seq)
+    assert "    if arg0:GetRandam_Int(1, 100) <= 50 then" in out
+    assert "    elseif arg0:GetRandam_Int(1, 100) <= 33 then" in out
+    assert "    else" in out
+    # only one closing end for the whole ladder (not two nested)
+    assert out.count("    end\n") == 1 or out.split("\n").count("    end") == 1
+
+
+def test_nested_else_if_stays_nested():
+    # a plain nested branch in the else (from_elseif=False) stays `else / if`
+    seq = ComboSequence(
+        name="nested", trigger_type="act_entry", trigger_id=1,
+        steps=[Branch(
+            terms=[randam(50)],
+            true_branch=[ComboStep("ComboFinal", 3001, 10, extra_args=[0])],
+            false_branch=[Branch(
+                terms=[randam(33)],   # from_elseif defaults False
+                true_branch=[ComboStep("ComboFinal", 3002, 10, extra_args=[0])])])],
+    )
+    out = generate_act(seq)
+    assert "    else" in out
+    assert "        if arg0:GetRandam_Int(1, 100) <= 33 then" in out
+    assert "elseif" not in out
+
+
 def test_ninsatsu_branch_condition():
     seq = ComboSequence(
         name="phase", trigger_type="act_entry", trigger_id=1,
@@ -194,6 +231,20 @@ def test_value_receiver_convention():
     assert "arg1:GetNinsatsuNum() <= 1" in iout
     assert "arg1:HasSpecialEffectId(TARGET_SELF, 200050)" in iout
     assert "arg2:AddSubGoal" in iout
+
+
+def test_grouped_condition_parenthesized():
+    # (randam <= 50 or ninsatsu <= 1) and speffect  -> grouped with parens
+    seq = ComboSequence(
+        name="grp", trigger_type="act_entry", trigger_id=1,
+        steps=[Branch(terms=[or_(randam(50), ninsatsu("<=", 1)),
+                              speffect("TARGET_ENE_0", 110030)],
+                      connective="and",
+                      true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])])],
+    )
+    out = generate_act(seq)
+    assert ("if (arg0:GetRandam_Int(1, 100) <= 50 or arg0:GetNinsatsuNum() <= 1) "
+            "and arg0:HasSpecialEffectId(TARGET_ENE_0, 110030) then") in out
 
 
 def test_raw_branch_condition():

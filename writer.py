@@ -13,12 +13,19 @@ data model.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from datetime import datetime
 
 import generator
-from models import ComboSequence, KengekiActivator
+from models import Branch, ComboSequence, ComboStep, KengekiActivator
 from parser import iter_function_spans
+
+# Which enclosing Goal function holds the REGIST_FUNC / SetCoolTime block for a
+# given combo family, and the default table variable names used there.
+_FAMILY_ENCLOSING = {"Act": "Activate", "Kengeki": "Kengeki_Activate"}
+_FAMILY_REGIST_VAR = {"Act": "local1", "Kengeki": "local2"}
+_FAMILY_COOL_VAR = {"Act": "act", "Kengeki": "kengeki"}
 
 
 def _line_starts(text: str):
@@ -93,6 +100,124 @@ def ensure_registration(text: str, effect_id: int, target: str = "TARGET_SELF") 
     return text[:header_eol] + "\n" + line + text[header_eol:]
 
 
+# --- REGIST_FUNC + SetCoolTime for new Act/Kengeki ------------------------
+
+def _enclosing_span(text: str, family: str):
+    """(start, end) of the Goal function that holds the family's REGIST block."""
+    name = _FAMILY_ENCLOSING[family]
+    return next(((s, e) for n, s, e in iter_function_spans(text) if n == name), None)
+
+
+def _span_lines(text: str, span):
+    """Yield (line_index, offset, line) for each line whose start is in span."""
+    start, end = span
+    offsets, lines = _line_starts(text)
+    for i, off in enumerate(offsets):
+        if start <= off < end:
+            yield i, off, lines[i]
+
+
+def _first_spin_anim(seq: ComboSequence):
+    """Anim id of the first ComboAttackTunableSpin step (recursing branches);
+    fall back to the first step's anim; None if the combo is empty."""
+    first = [None]
+
+    def walk(items):
+        for it in items:
+            if isinstance(it, ComboStep):
+                if first[0] is None:
+                    first[0] = it.anim_id
+                if it.goal_type == "ComboAttackTunableSpin":
+                    return it.anim_id
+            elif isinstance(it, Branch):
+                for body in (it.true_branch, it.false_branch):
+                    hit = walk(body)
+                    if hit is not None:
+                        return hit
+        return None
+
+    spin = walk(seq.steps)
+    return spin if spin is not None else first[0]
+
+
+def _indexed_line_insert(text, span, pattern, num, make_line):
+    """Insert a line among the `span` lines matching `pattern` (capturing
+    (indent, var, index)), keeping numeric order. `make_line(indent, var)`
+    builds the new line from the detected indent/table-variable. Returns
+    (text, added): added is True (inserted), False (num already present), or
+    None (no matching line found — caller should fall back)."""
+    pat = re.compile(pattern)
+    matches = []   # (offset, line, indent, var, idx)
+    for _i, off, line in _span_lines(text, span):
+        m = pat.match(line)
+        if m:
+            matches.append((off, line, m.group(1), m.group(2), int(m.group(3))))
+    if not matches:
+        return text, None
+    if any(idx == num for *_r, idx in matches):
+        return text, False
+    indent, var = matches[0][2], matches[0][3]
+    new_line = make_line(indent, var)
+    for off, line, _ind, _var, idx in matches:
+        if idx > num:
+            return text[:off] + new_line + "\n" + text[off:], True
+    off, line, *_ = matches[-1]
+    pos = off + len(line)
+    return text[:pos] + "\n" + new_line + text[pos:], True
+
+
+def _fallback_insert_before_end(text, span, new_line):
+    """Insert `new_line` just before the enclosing function's final `end`."""
+    last_end = None
+    for _i, off, line in _span_lines(text, span):
+        if line.strip() == "end":
+            last_end = off
+    if last_end is None:
+        return text, False
+    return text[:last_end] + new_line + "\n" + text[last_end:], True
+
+
+def ensure_regist_func(text: str, family: str, num: int) -> tuple[str, bool]:
+    """Add `<var>[num] = REGIST_FUNC(arg1, arg2, arg0.<Family>NN)` in the
+    enclosing Goal function, in numeric order. No-op if already present."""
+    span = _enclosing_span(text, family)
+    if span is None:
+        return text, False
+    make = lambda indent, var: (
+        f"{indent}{var}[{num}] = REGIST_FUNC(arg1, arg2, arg0.{family}{num:02d})")
+    pattern = rf"^(\s*)(\w+)\[(\d+)\] = REGIST_FUNC\(arg1, arg2, arg0\.{family}\d+\)\s*$"
+    new_text, added = _indexed_line_insert(text, span, pattern, num, make)
+    if added is None:
+        # F: no REGIST block for this family -> defaults, insert before `end`
+        return _fallback_insert_before_end(
+            text, span, make("    ", _FAMILY_REGIST_VAR[family]))
+    return new_text, bool(added)
+
+
+def ensure_cooltime(text: str, family: str, num: int, spin_anim, seconds: int
+                    ) -> tuple[str, bool]:
+    """Add `<var>[num] = SetCoolTime(arg1, arg2, <spin_anim>, <seconds>,
+    <var>[num], 1)` in numeric order. No-op if already present."""
+    span = _enclosing_span(text, family)
+    if span is None or spin_anim is None:
+        return text, False
+    make = lambda indent, var: (
+        f"{indent}{var}[{num}] = SetCoolTime(arg1, arg2, {spin_anim}, "
+        f"{seconds}, {var}[{num}], 1)")
+    pattern = r"^(\s*)(\w+)\[(\d+)\] = SetCoolTime\("
+    new_text, added = _indexed_line_insert(text, span, pattern, num, make)
+    if added is not None:
+        return new_text, bool(added)
+    # F: no SetCoolTime block -> defaults, insert right before the family REGIST
+    line = make("    ", _FAMILY_COOL_VAR[family])
+    regist = re.compile(
+        rf"^\s*\w+\[\d+\] = REGIST_FUNC\(arg1, arg2, arg0\.{family}\d+\)\s*$")
+    for _i, off, ln in _span_lines(text, span):
+        if regist.match(ln):
+            return text[:off] + line + "\n" + text[off:], True
+    return _fallback_insert_before_end(text, span, line)
+
+
 # --- interrupt elseif chain -----------------------------------------------
 
 def _interrupt_chain_end(text: str):
@@ -149,8 +274,29 @@ def upsert_interrupt_branch(text: str, effect_id: int, branch_text: str) -> str:
 
 # --- dispatch + file write ------------------------------------------------
 
-def apply_sequence(text: str, seq) -> tuple[str, list[str]]:
-    """Return (new_text, summary) after splicing `seq` into `text`."""
+def _apply_new_function(text, seq, family, num, func_text, cooldown, summary):
+    """Insert/replace a Goal function; on a NEW function also add its
+    REGIST_FUNC line and (if a cooldown is given) a SetCoolTime line."""
+    name = f"{family}{num:02d}"
+    is_new = not function_exists(text, name)
+    text = replace_or_insert_function(text, name, func_text)
+    summary.append(f"{'Insert' if is_new else 'Replace'} Goal.{name}")
+    if is_new:
+        text, added = ensure_regist_func(text, family, num)
+        if added:
+            summary.append(f"Register {family}{num:02d}")
+        if cooldown is not None:
+            spin = _first_spin_anim(seq)
+            text, added = ensure_cooltime(text, family, num, spin, cooldown)
+            if added:
+                summary.append(f"Add cooldown {cooldown}s (anim {spin})")
+    return text
+
+
+def apply_sequence(text: str, seq, cooldown=None) -> tuple[str, list[str]]:
+    """Return (new_text, summary) after splicing `seq` into `text`. For a NEW
+    Act/Kengeki, also add its REGIST_FUNC line and — if `cooldown` (seconds) is
+    given — a SetCoolTime line."""
     if isinstance(seq, KengekiActivator):
         return text, ["Kengeki_Activate write is not supported yet (view only)."]
     if not isinstance(seq, ComboSequence):
@@ -158,15 +304,11 @@ def apply_sequence(text: str, seq) -> tuple[str, list[str]]:
 
     summary: list[str] = []
     if seq.trigger_type == "act_entry":
-        name = f"Act{seq.trigger_id:02d}"
-        verb = "Replace" if function_exists(text, name) else "Insert"
-        text = replace_or_insert_function(text, name, generator.generate_act(seq))
-        summary.append(f"{verb} Goal.{name}")
+        text = _apply_new_function(text, seq, "Act", seq.trigger_id,
+                                   generator.generate_act(seq), cooldown, summary)
     elif seq.trigger_type == "kengeki_move":
-        name = f"Kengeki{seq.trigger_id:02d}"
-        verb = "Replace" if function_exists(text, name) else "Insert"
-        text = replace_or_insert_function(text, name, generator.generate_kengeki_move(seq))
-        summary.append(f"{verb} Goal.{name}")
+        text = _apply_new_function(text, seq, "Kengeki", seq.trigger_id,
+                                   generator.generate_kengeki_move(seq), cooldown, summary)
     elif seq.trigger_type == "special_effect":
         if generator.needs_registration(seq.trigger_id, "TARGET_SELF", text):
             text = ensure_registration(text, seq.trigger_id, "TARGET_SELF")
@@ -179,6 +321,74 @@ def apply_sequence(text: str, seq) -> tuple[str, list[str]]:
     else:
         summary.append(f"unknown trigger_type: {seq.trigger_type}")
     return text, summary
+
+
+# --- remove from file -----------------------------------------------------
+
+def _remove_first_line(text: str, pattern: str, span=None) -> tuple[str, bool]:
+    """Delete the first line (with its newline) matching `pattern`. If `span`
+    is given, only lines starting inside it are considered."""
+    pat = re.compile(pattern)
+    offsets, lines = _line_starts(text)
+    for i, off in enumerate(offsets):
+        if span is not None and not (span[0] <= off < span[1]):
+            continue
+        if pat.match(lines[i]):
+            end = off + len(lines[i]) + 1   # include trailing newline
+            return text[:off] + text[end:], True
+    return text, False
+
+
+def remove_function(text: str, name: str) -> tuple[str, list[str]]:
+    """Delete Goal.<name> plus its REGIST_FUNC line and matching SetCoolTime
+    line (same family/index). Returns (new_text, summary)."""
+    summary: list[str] = []
+    for fname, start, end in iter_function_spans(text):
+        if fname == name:
+            text = text[:start] + text[end:]
+            summary.append(f"Remove Goal.{name}")
+            break
+    else:
+        return text, summary   # nothing to remove
+    family = "Kengeki" if name.startswith("Kengeki") else "Act"
+    num = int(re.search(r"\d+", name).group())
+    text, removed = _remove_first_line(
+        text, rf"^\s*\w+\[\d+\] = REGIST_FUNC\(arg1, arg2, arg0\.{re.escape(name)}\)\s*$")
+    if removed:
+        summary.append(f"Remove REGIST_FUNC {name}")
+    span = _enclosing_span(text, family)   # scope cooldown removal to right table
+    text, removed = _remove_first_line(
+        text, rf"^\s*\w+\[{num}\] = SetCoolTime\(", span)
+    if removed:
+        summary.append(f"Remove cooldown {name}")
+    return text, summary
+
+
+def remove_interrupt_branch(text: str, effect_id: int) -> tuple[str, list[str]]:
+    """Delete an `elseif interruptEffectIdentifier == id` branch."""
+    span = _existing_branch_span(text, effect_id)
+    if span is None:
+        return text, []
+    start, end = span
+    return text[:start] + text[end:], [f"Remove interrupt branch {effect_id}"]
+
+
+def remove_registration(text: str, effect_id: int, target: str | None = None
+                        ) -> tuple[str, list[str]]:
+    """Delete `arg1:AddObserveSpecialEffectAttribute(<target>, id)` in
+    Goal.Activate. target=None removes BOTH TARGET_SELF and TARGET_ENE_0."""
+    span = _enclosing_span(text, "Act")   # Goal.Activate
+    if span is None:
+        return text, []
+    targets = [target] if target else ["TARGET_SELF", "TARGET_ENE_0"]
+    removed: list[str] = []
+    for tgt in targets:
+        pattern = (rf"^\s*arg1:AddObserveSpecialEffectAttribute\(\s*{tgt}\s*,"
+                   rf"\s*{effect_id}\s*\)\s*$")
+        text, hit = _remove_first_line(text, pattern, _enclosing_span(text, "Act"))
+        if hit:
+            removed.append(f"Remove registration {effect_id} ({tgt})")
+    return text, removed
 
 
 def _unique_backup_path(path: str) -> str:

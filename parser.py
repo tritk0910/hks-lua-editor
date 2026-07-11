@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 
 from models import (
+    BoolNode,
     Branch,
     ComboSequence,
     ComboStep,
@@ -168,32 +169,89 @@ def _parse_addsubgoal(text: str, locals_: dict, warnings: list) -> ComboStep:
                      distance=distance, target=target, extra_args=extra)
 
 
-def _split_top_level_bool(cond: str):
-    """Split a condition on top-level ` and `/` or ` (respecting parens).
+def _tokenize_cond(s: str):
+    """Tokenize a Lua condition into and/or/not keywords, grouping parens, and
+    term text. A `(` that immediately follows an identifier is a function-call
+    paren (part of a term), not a grouping paren."""
+    toks, term, i, n = [], "", 0, len(s)
 
-    Returns (connective, parts). connective is "and"/"or", None if there is no
-    top-level connective, or "__mixed__" if both appear (can't model cleanly).
-    """
-    parts, cur, depth, conns = [], "", 0, []
-    i, n = 0, len(cond)
+    def flush():
+        nonlocal term
+        if term.strip():
+            toks.append(("term", term.strip()))
+        term = ""
+
     while i < n:
-        c = cond[i]
+        c = s[i]
         if c == "(":
-            depth += 1; cur += c; i += 1
-        elif c == ")":
-            depth -= 1; cur += c; i += 1
-        elif depth == 0 and cond[i:i + 5] == " and ":
-            parts.append(cur); conns.append("and"); cur = ""; i += 5
-        elif depth == 0 and cond[i:i + 4] == " or ":
-            parts.append(cur); conns.append("or"); cur = ""; i += 4
-        else:
-            cur += c; i += 1
-    parts.append(cur)
-    if not conns:
-        return None, [cond]
-    if len(set(conns)) > 1:
-        return "__mixed__", [cond]
-    return conns[0], [p.strip() for p in parts]
+            prev = term.rstrip()[-1:] if term.rstrip() else (s[i - 1] if i else "")
+            if prev and (prev.isalnum() or prev == "_"):   # function-call paren
+                depth = 0
+                while i < n:
+                    term += s[i]
+                    if s[i] == "(":
+                        depth += 1
+                    elif s[i] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            i += 1
+                            break
+                    i += 1
+                continue
+            flush(); toks.append(("(", "(")); i += 1; continue
+        if c == ")":
+            flush(); toks.append((")", ")")); i += 1; continue
+        m = re.match(r"(and|or|not)(?=\s|\(|$)", s[i:])
+        if m and (i == 0 or s[i - 1] in " \t("):
+            flush(); toks.append((m.group(1), m.group(1))); i += len(m.group(1)); continue
+        term += c; i += 1
+    flush()
+    return toks
+
+
+class _CondParser:
+    """Recursive-descent parser: expr = or; or = and ('or' and)*;
+    and = unary ('and' unary)*; unary = 'not'* atom; atom = '(' expr ')' | term."""
+
+    def __init__(self, toks, locals_):
+        self.toks, self.i, self.locals = toks, 0, locals_
+
+    def _peek(self):
+        return self.toks[self.i][0] if self.i < len(self.toks) else None
+
+    def _parse(self, op, sub):
+        parts = [sub()]
+        while self._peek() == op:
+            self.i += 1
+            parts.append(sub())
+        return parts[0] if len(parts) == 1 else BoolNode(op=op, terms=parts)
+
+    def parse_expr(self):
+        return self._parse("or", lambda: self._parse("and", self._unary))
+
+    def _unary(self):
+        neg = False
+        while self._peek() == "not":
+            self.i += 1
+            neg = not neg
+        atom = self._atom()
+        if neg:
+            atom.negate = not atom.negate
+        return atom
+
+    def _atom(self):
+        tok = self._peek()
+        if tok == "(":
+            self.i += 1
+            node = self.parse_expr()
+            if self._peek() == ")":
+                self.i += 1
+            return node
+        if tok == "term":
+            text = self.toks[self.i][1]
+            self.i += 1
+            return _classify_term(text, self.locals)
+        return Term(kind="raw", raw="")
 
 
 def _classify_term(cond: str, locals_: dict) -> Term:
@@ -228,22 +286,24 @@ def _classify_term(cond: str, locals_: dict) -> Term:
     return Term(kind="raw", raw=original)
 
 
+def _has_raw(item) -> bool:
+    if isinstance(item, BoolNode):
+        return any(_has_raw(c) for c in item.terms)
+    return item.kind == "raw"
+
+
 def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
-    """Turn a Lua `if` condition into a Branch of one or more Terms."""
+    """Turn a Lua `if` condition into a Branch whose `terms` may nest BoolNode
+    groups, e.g. `(A or B) and C` -> terms=[BoolNode(or,[A,B]), C]."""
     cond = cond.strip()
-    conn, parts = _split_top_level_bool(cond)
-    if conn == "__mixed__" or (conn is not None and any(p.startswith("(") for p in parts)):
-        warnings.append(f"un-modelled condition kept raw: {cond}")
-        return Branch(terms=[Term(kind="raw", raw=cond)])
-    if conn is None:
-        term = _classify_term(cond, locals_)
-        if term.kind == "raw":
-            warnings.append(f"un-modelled condition kept raw: {cond}")
-        return Branch(terms=[term])
-    terms = [_classify_term(p, locals_) for p in parts]
-    if any(t.kind == "raw" for t in terms):
-        warnings.append(f"partially-modelled condition: {cond}")
-    return Branch(terms=terms, connective=conn)
+    root = _CondParser(_tokenize_cond(cond), locals_).parse_expr()
+    if isinstance(root, BoolNode) and not root.negate:
+        branch = Branch(terms=list(root.terms), connective=root.op)
+    else:
+        branch = Branch(terms=[root])   # single term or a negated group
+    if _has_raw(branch.terms[0] if len(branch.terms) == 1 else BoolNode("and", branch.terms)):
+        warnings.append(f"condition has un-modelled parts kept raw: {cond}")
+    return branch
 
 
 def _addsubgoal_leaf(text, locals_, warnings):

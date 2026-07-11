@@ -30,13 +30,15 @@ class StepDialog(QDialog):
     "3.5 - arg0:GetMapHitRadius(TARGET_SELF)") or comma lists like "0, 0".
     """
 
-    def __init__(self, parent=None, step: ComboStep | None = None):
+    def __init__(self, parent=None, step: ComboStep | None = None,
+                 default_goal_type: str = "ComboRepeat"):
         super().__init__(parent)
         self.setWindowTitle("Edit step" if step else "Add step")
 
         self.goal_type = QComboBox()
         self.goal_type.setEditable(True)   # allow rare types not in the list
         self.goal_type.addItems(GOAL_TYPES)
+        self.goal_type.setCurrentText(default_goal_type)   # for a new step
 
         self.anim_id = QSpinBox()
         self.anim_id.setRange(0, 9_999_999)

@@ -12,6 +12,7 @@ level under it.
 from __future__ import annotations
 
 from models import (
+    BoolNode,
     Branch,
     ComboSequence,
     ComboStep,
@@ -38,9 +39,16 @@ def _term_text(term) -> str:
     return f"not {core}" if term.negate else core
 
 
+def _cond_item_text(item) -> str:
+    if isinstance(item, BoolNode):
+        inner = f" {item.op} ".join(_cond_item_text(c) for c in item.terms)
+        return f"not ({inner})" if item.negate else f"({inner})"
+    return _term_text(item)
+
+
 def condition_text(branch: Branch) -> str:
-    """Human-readable condition for a branch's if/elseif (terms joined)."""
-    return f" {branch.connective} ".join(_term_text(t) for t in branch.terms)
+    """Human-readable condition for a branch's if/elseif (terms + nested groups)."""
+    return f" {branch.connective} ".join(_cond_item_text(t) for t in branch.terms)
 
 
 def _step_leaf(step: ComboStep) -> str:

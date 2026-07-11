@@ -115,6 +115,20 @@ def test_ninsatsu_condition_parsed(parsed):
     assert found.operator in ("<=", ">=", "==", "<", ">")
 
 
+def test_parses_grouped_condition_to_ast():
+    from parser import _classify_condition
+    from models import BoolNode, Term
+    cond = ("(arg1:HasSpecialEffectId(TARGET_ENE_0, 9505) or "
+            "arg1:HasSpecialEffectId(TARGET_ENE_0, 9506)) and getDist <= 13")
+    b = _classify_condition(cond, {}, [])
+    assert b.connective == "and"
+    assert len(b.terms) == 2
+    grp = b.terms[0]
+    assert isinstance(grp, BoolNode) and grp.op == "or" and len(grp.terms) == 2
+    assert all(t.kind == "speffect" for t in grp.terms)
+    assert isinstance(b.terms[1], Term)   # getDist <= 13 -> raw term, separate node
+
+
 def test_speffect_and_compound_condition_parsed(parsed):
     # Goal.Interrupt uses `... and arg1:HasSpecialEffectId(TARGET_SELF, 3710032)`
     # and negated `not arg1:HasSpecialEffectId(...)`. Confirm terms are modelled.

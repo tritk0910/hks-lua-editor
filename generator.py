@@ -12,11 +12,13 @@ from __future__ import annotations
 import re
 
 from models import (
+    BoolNode,
     Branch,
     ComboSequence,
     ComboStep,
     KengekiActivator,
     KengekiWeight,
+    unchain_branch,
 )
 
 INDENT = "    "  # 4 spaces, matching the reference file
@@ -95,11 +97,18 @@ def _term_lua(term, ctx: str) -> str:
     return f"not {core}" if term.negate else core
 
 
+def _cond_item_lua(item, ctx: str) -> str:
+    """Render one condition element — a Term or a parenthesised BoolNode group."""
+    if isinstance(item, BoolNode):
+        inner = f" {item.op} ".join(_cond_item_lua(c, ctx) for c in item.terms)
+        return f"not ({inner})" if item.negate else f"({inner})"
+    return _term_lua(item, ctx)
+
+
 def _branch_condition(branch: Branch, ctx: str) -> str:
-    """The Lua boolean expression for a branch's `if` — terms joined by the
-    branch connective (`and`/`or`)."""
-    parts = [_term_lua(t, ctx) for t in branch.terms]
-    return f" {branch.connective} ".join(parts)
+    """The Lua boolean expression for a branch's `if` — terms (possibly nested
+    BoolNode groups) joined by the branch connective (`and`/`or`)."""
+    return f" {branch.connective} ".join(_cond_item_lua(t, ctx) for t in branch.terms)
 
 
 def render_items(items, receiver: str, ctx: str, indent: str = "") -> str:
@@ -113,12 +122,18 @@ def render_items(items, receiver: str, ctx: str, indent: str = "") -> str:
         if isinstance(item, ComboStep):
             lines.append(render_step(item, receiver, indent))
         elif isinstance(item, Branch):
-            cond = _branch_condition(item, ctx)
-            lines.append(f"{indent}if {cond} then")
-            lines.append(render_items(item.true_branch, receiver, ctx, indent + INDENT))
-            if item.false_branch:
+            # ladder: emit if / elseif (from_elseif arms) / else — matches the
+            # tree + visualizer so generated Lua reads the same as the diagram.
+            arms, else_items = unchain_branch(item, items)
+            for k, (arm, _lst) in enumerate(arms):
+                kw = "if" if k == 0 else "elseif"
+                lines.append(f"{indent}{kw} {_branch_condition(arm, ctx)} then")
+                body = render_items(arm.true_branch, receiver, ctx, indent + INDENT)
+                if body:
+                    lines.append(body)
+            if else_items:
                 lines.append(f"{indent}else")
-                lines.append(render_items(item.false_branch, receiver, ctx, indent + INDENT))
+                lines.append(render_items(else_items, receiver, ctx, indent + INDENT))
             lines.append(f"{indent}end")
         else:
             raise TypeError(f"combo item must be ComboStep or Branch, got {type(item)!r}")
@@ -200,12 +215,16 @@ def _render_kengeki_items(items, indent: str) -> str:
             lines.append(f"{indent}kengeki[{item.index}] = {item.value}")
         elif isinstance(item, Branch):
             # Kengeki_Activate reads values via arg1 (arg2 is the step object)
-            cond = _branch_condition(item, ctx="kengeki_activate")
-            lines.append(f"{indent}if {cond} then")
-            lines.append(_render_kengeki_items(item.true_branch, indent + INDENT))
-            if item.false_branch:
+            arms, else_items = unchain_branch(item, items)
+            for k, (arm, _lst) in enumerate(arms):
+                kw = "if" if k == 0 else "elseif"
+                lines.append(f"{indent}{kw} {_branch_condition(arm, 'kengeki_activate')} then")
+                body = _render_kengeki_items(arm.true_branch, indent + INDENT)
+                if body:
+                    lines.append(body)
+            if else_items:
                 lines.append(f"{indent}else")
-                lines.append(_render_kengeki_items(item.false_branch, indent + INDENT))
+                lines.append(_render_kengeki_items(else_items, indent + INDENT))
             lines.append(f"{indent}end")
         else:
             raise TypeError(f"kengeki item must be KengekiWeight or Branch, got {type(item)!r}")

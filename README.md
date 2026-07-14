@@ -36,8 +36,12 @@ It handles three combo families found in a real behavior file:
 ## Usage
 1. **Load a file** — File → *Load .lua…* (Ctrl+O). Every `Goal.ActNN`,
    `Goal.KengekiNN`, interrupt branch, and the `Kengeki_Activate` selector
-   becomes a selectable combo in the dropdown. Or start fresh with
-   File → *New combo* (Ctrl+N).
+   becomes a selectable combo in the dropdown. Or start fresh with *New*
+   (Ctrl+N): a dialog asks for the combo's name, trigger type, and id — if that
+   Act/Kengeki/special-effect already exists (in the loaded file or the open
+   list) it is blocked so you can't accidentally overwrite it. The trigger
+   type/id are fixed after creation (the *Name* stays editable); use *Delete
+   combo* and re-create to change them.
 2. **Pick / set the trigger** — choose the trigger type (`act_entry`,
    `special_effect`, or `kengeki_move`) and its id (the Act number, the
    special-effect id, or the Kengeki number).
@@ -82,6 +86,8 @@ It handles three combo families found in a real behavior file:
   it does not touch the existing REGIST / cooldown lines.
 
 ### Removing a combo
+- *Delete combo* (button, or Edit → *Delete combo*) removes the current combo
+  from the dropdown/memory only — the `.lua` file is not touched.
 - File → *Remove from file…* deletes the currently selected combo:
   - an Act/Kengeki → its function **and** its `REGIST_FUNC` and `SetCoolTime`
     lines, and

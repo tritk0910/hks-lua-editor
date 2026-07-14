@@ -42,6 +42,7 @@ class StepDialog(QDialog):
 
         self.anim_id = QSpinBox()
         self.anim_id.setRange(0, 9_999_999)
+        self.anim_id.setValue(3000)        # sensible default for a new step
         self.priority = QSpinBox()
         self.priority.setRange(0, 999)
         self.priority.setValue(10)

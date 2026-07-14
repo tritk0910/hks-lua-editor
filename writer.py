@@ -293,10 +293,12 @@ def _apply_new_function(text, seq, family, num, func_text, cooldown, summary):
     return text
 
 
-def apply_sequence(text: str, seq, cooldown=None) -> tuple[str, list[str]]:
+def apply_sequence(text: str, seq, cooldown=None, target="TARGET_SELF"
+                   ) -> tuple[str, list[str]]:
     """Return (new_text, summary) after splicing `seq` into `text`. For a NEW
     Act/Kengeki, also add its REGIST_FUNC line and — if `cooldown` (seconds) is
-    given — a SetCoolTime line."""
+    given — a SetCoolTime line. For an interrupt, `target` is the observe target
+    (TARGET_SELF or TARGET_ENE_0) used when registering the special effect."""
     if isinstance(seq, KengekiActivator):
         return text, ["Kengeki_Activate write is not supported yet (view only)."]
     if not isinstance(seq, ComboSequence):
@@ -310,9 +312,9 @@ def apply_sequence(text: str, seq, cooldown=None) -> tuple[str, list[str]]:
         text = _apply_new_function(text, seq, "Kengeki", seq.trigger_id,
                                    generator.generate_kengeki_move(seq), cooldown, summary)
     elif seq.trigger_type == "special_effect":
-        if generator.needs_registration(seq.trigger_id, "TARGET_SELF", text):
-            text = ensure_registration(text, seq.trigger_id, "TARGET_SELF")
-            summary.append(f"Add registration for {seq.trigger_id}")
+        if generator.needs_registration(seq.trigger_id, target, text):
+            text = ensure_registration(text, seq.trigger_id, target)
+            summary.append(f"Add registration for {seq.trigger_id} ({target})")
         existed = _existing_branch_span(text, seq.trigger_id) is not None
         text = upsert_interrupt_branch(
             text, seq.trigger_id, generator.generate_interrupt_branch(seq))

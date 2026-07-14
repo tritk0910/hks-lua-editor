@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QApplication,
     QComboBox,
     QDialog,
@@ -47,6 +49,7 @@ from models import (
 from parser import parse_file
 from visualizer import condition_text
 from ui.branch_dialog import BranchDialog
+from ui.combo_dialog import ComboDialog
 from ui.lua_highlighter import LuaHighlighter
 from ui.step_dialog import StepDialog
 from ui.tree_delegate import StepDelegate
@@ -114,8 +117,12 @@ class MainWindow(QWidget):
         self.combo_selector.currentIndexChanged.connect(self._on_combo_switched)
         new_btn = QPushButton("New")
         new_btn.clicked.connect(self._new_combo)
+        del_combo_btn = QPushButton("Delete combo")
+        del_combo_btn.clicked.connect(self._delete_combo)
         load_btn = QPushButton("Load .lua…")
         load_btn.clicked.connect(self._load_file)
+        close_btn = QPushButton("Close file")
+        close_btn.clicked.connect(self._close_file)
         write_btn = QPushButton("Write to file…")
         write_btn.clicked.connect(self._write_to_file)
         open_btn = QPushButton("Open in editor")
@@ -124,15 +131,18 @@ class MainWindow(QWidget):
         import_btn.clicked.connect(self._import_dsas)
         export_btn = QPushButton("Export DSAS…")
         export_btn.clicked.connect(self._export_dsas)
+        # row 1: pick/create combos; row 2: file + import/export actions —
+        # split so the buttons don't crowd the combo selector off-screen.
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Combo:"))
         sel_row.addWidget(self.combo_selector, 1)
         sel_row.addWidget(new_btn)
-        sel_row.addWidget(load_btn)
-        sel_row.addWidget(write_btn)
-        sel_row.addWidget(open_btn)
-        sel_row.addWidget(import_btn)
-        sel_row.addWidget(export_btn)
+        sel_row.addWidget(del_combo_btn)
+
+        file_row = QHBoxLayout()
+        for b in (load_btn, close_btn, write_btn, open_btn, import_btn, export_btn):
+            file_row.addWidget(b)
+        file_row.addStretch(1)
 
         # metadata form
         self.name_edit = QLineEdit()
@@ -195,6 +205,7 @@ class MainWindow(QWidget):
 
         left = QVBoxLayout()
         left.addLayout(sel_row)
+        left.addLayout(file_row)
         left.addLayout(form)
         left.addWidget(self.tree, 1)
         left.addLayout(btn_row)
@@ -246,6 +257,8 @@ class MainWindow(QWidget):
         file_menu = bar.addMenu("File")
         file_menu.addAction(act("New combo", self._new_combo, "Ctrl+N"))
         file_menu.addAction(act("Load .lua…", self._load_file, "Ctrl+O"))
+        self._recent_menu = file_menu.addMenu("Open Recent")
+        file_menu.addAction(act("Close file", self._close_file, "Ctrl+W"))
         file_menu.addAction(act("Write to file…", self._write_to_file, "Ctrl+S"))
         file_menu.addAction(act("Remove from file…", self._remove_from_file))
         file_menu.addAction(act("Remove special effect…", self._remove_speffect_from_file))
@@ -268,12 +281,15 @@ class MainWindow(QWidget):
         edit_menu.addAction(act("Duplicate", self._duplicate_selected, "Ctrl+D"))
         edit_menu.addAction(act("Delete", self._remove_selected, "Del"))
         edit_menu.addSeparator()
+        edit_menu.addAction(act("Delete combo", self._delete_combo))
+        edit_menu.addSeparator()
         edit_menu.addAction(act("Add step", self._add_step))
         edit_menu.addAction(act("Add branch", self._add_branch))
         edit_menu.addAction(act("Add elseif", self._add_elseif))
 
         help_menu = bar.addMenu("Help")
         help_menu.addAction(act("About", self._about))
+        self._rebuild_recent_menu()
         return bar
 
     def _about(self):
@@ -302,14 +318,126 @@ class MainWindow(QWidget):
         self._sync_form_from_seq()
         self.refresh()
 
+    def _current_file_text(self) -> str:
+        """Freshest text of the write target for conflict checks: the file on
+        disk if we have one, else the snapshot captured at load, else empty."""
+        if self.loaded_path and os.path.exists(self.loaded_path):
+            with open(self.loaded_path, encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        return self._loaded_text or ""
+
+    def _combo_conflict(self, trigger_type: str, trigger_id: int) -> str | None:
+        """Reason string if a combo with these props already exists (in the
+        loaded .lua or among the open combos), else None."""
+        # already open in the dropdown?
+        for c in self.combos:
+            if (isinstance(c, ComboSequence)
+                    and c.trigger_type == trigger_type and c.trigger_id == trigger_id):
+                return f"A {trigger_type} combo with id {trigger_id} is already open."
+        text = self._current_file_text()
+        if not text:
+            return None
+        if trigger_type == "act_entry":
+            if writer.function_exists(text, f"Act{trigger_id:02d}"):
+                return f"Goal.Act{trigger_id:02d} already exists in the file."
+        elif trigger_type == "kengeki_move":
+            if writer.function_exists(text, f"Kengeki{trigger_id:02d}"):
+                return f"Goal.Kengeki{trigger_id:02d} already exists in the file."
+        elif trigger_type == "special_effect":
+            registered = (not generator.needs_registration(trigger_id, "TARGET_SELF", text)
+                          or not generator.needs_registration(trigger_id, "TARGET_ENE_0", text))
+            if registered:
+                return f"Special effect {trigger_id} is already registered in the file."
+            if writer._existing_branch_span(text, trigger_id) is not None:
+                return f"An interrupt branch for {trigger_id} already exists in the file."
+        return None
+
     def _new_combo(self):
-        seq = self._tag(ComboSequence(name=f"combo{len(self.combos) + 1}",
-                                      trigger_type="act_entry", trigger_id=0))
+        name = f"combo{len(self.combos) + 1}"
+        ttype, tid = "act_entry", 0
+        while True:
+            dlg = ComboDialog(self, name=name, trigger_type=ttype, trigger_id=tid)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            name, ttype, tid = dlg.result()
+            reason = self._combo_conflict(ttype, tid)
+            if reason is None:
+                break
+            QMessageBox.warning(self, "Already exists",
+                                reason + "\n\nChoose different props.")
+        seq = self._tag(ComboSequence(name=name, trigger_type=ttype, trigger_id=tid))
         self.combos.append(seq)
         self.seq = seq
         self._refresh_selector()
         self._sync_form_from_seq()
         self.refresh()
+
+    def _delete_combo(self):
+        """Remove the current combo from the dropdown/memory (does NOT touch any
+        .lua file — use 'Remove from file…' for that)."""
+        if not self._is_combo():
+            self.status.setStyleSheet("color: gray;")
+            self.status.setText("Select a combo to delete.")
+            return
+        ok = QMessageBox.question(
+            self, "Delete combo",
+            f"Remove '{self.seq.name}' from the list?\n"
+            "(This only removes it here — the .lua file is not changed.)",
+            QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        self._drop_current_combo()
+
+    def _has_content(self) -> bool:
+        """Whether there is anything worth warning about before discarding."""
+        return bool(self.loaded_path or len(self.combos) > 1 or self.seq.steps)
+
+    def _confirm_discard(self, verb: str) -> bool:
+        """Standard Save / Don't Save / Cancel prompt before losing work.
+        Returns True if it's OK to proceed (Save was handled, or Don't Save),
+        False if the user cancelled."""
+        if not self._has_content():
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle(verb)
+        box.setIcon(QMessageBox.Warning)
+        box.setText("You may have unsaved changes.")
+        box.setInformativeText(f"Save to the .lua file before {verb.lower()}?")
+        box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Save)
+        choice = box.exec()
+        if choice == QMessageBox.Cancel:
+            return False
+        if choice == QMessageBox.Save:
+            self._write_to_file()      # writes the current combo to its target
+        return True
+
+    def closeEvent(self, event):
+        # remind to save on app exit, like other editors
+        if self._confirm_discard("Exit"):
+            event.accept()
+        else:
+            event.ignore()
+
+    def _close_file(self):
+        """Discard the loaded file and all combos, returning to the fresh
+        startup state (a single empty default combo, no write target)."""
+        if not self._confirm_discard("Close file"):
+            return
+        first = self._tag(ComboSequence(name="my_combo", trigger_type="act_entry",
+                                        trigger_id=50))
+        self.combos = [first]
+        self.seq = first
+        self.loaded_path = None
+        self._loaded_text = ""
+        self._originals = {}
+        self._history = {}
+        self._clipboard = None
+        self._refresh_selector()
+        self._sync_form_from_seq()
+        self.refresh()
+        self.status.setStyleSheet("color: gray;")
+        self.status.setText("Closed file — back to default state")
 
     def _tag(self, combo):
         """Give a combo a stable uid (survives deepcopy) for history/revert."""
@@ -423,8 +551,12 @@ class MainWindow(QWidget):
 
     def _sync_form_from_seq(self):
         editable = self._is_combo()
-        for w in (self.name_edit, self.trigger_type, self.trigger_id):
-            w.setEnabled(editable)
+        # Name stays editable inline; trigger type/id are set once at creation
+        # (via the New-combo modal) and shown read-only afterwards.
+        self.name_edit.setEnabled(editable)
+        self.trigger_type.setEnabled(False)
+        self.trigger_id.setReadOnly(True)
+        self.trigger_id.setButtonSymbols(QAbstractSpinBox.NoButtons)
         if not editable:
             return
         self._syncing = True
@@ -824,16 +956,25 @@ class MainWindow(QWidget):
     def _load_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open behavior .lua", "", "Lua files (*.lua);;All files (*)")
-        if not path:
-            return
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            self._loaded_text = f.read()
-        result = parse_file(self._loaded_text)
+        if path:
+            self._load_path(path)
+
+    def _load_path(self, path: str) -> bool:
+        """Parse `path` and load its combos. Returns True on success; leaves
+        state unchanged (and warns) if nothing parsed or the read fails."""
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot open", f"Could not read the file:\n{exc}")
+            return False
+        result = parse_file(text)
         items = list(result.sequences) + list(result.activators)
         if not items:
             QMessageBox.warning(self, "Nothing parsed",
                                 "No combos or kengeki selector were found.")
-            return
+            return False
+        self._loaded_text = text
         self.loaded_path = path
         for it in items:                          # uid + original snapshot for revert
             self._tag(it)
@@ -845,9 +986,65 @@ class MainWindow(QWidget):
         self._refresh_selector()
         self._sync_form_from_seq()
         self.refresh()
+        self._add_recent(path)
         self.status.setStyleSheet("color: #27ae60;")
         self.status.setText(f"Loaded {len(items)} items "
                             f"({len(result.warnings)} parse warnings).")
+        return True
+
+    # --- recent files (Open Recent, persisted via QSettings) --------------
+
+    def _settings(self) -> QSettings:
+        return QSettings("HKSLuaEditor", "HKSLuaEditor")
+
+    def _load_recents(self) -> list:
+        # QSettings may hand back a bare str for a 1-element list — normalize.
+        val = self._settings().value("recentFiles", [])
+        if isinstance(val, str):
+            return [val]
+        return list(val or [])
+
+    def _save_recents(self, paths: list):
+        self._settings().setValue("recentFiles", list(paths))
+
+    def _add_recent(self, path: str):
+        path = os.path.abspath(path)
+        key = os.path.normcase(path)
+        recents = [p for p in self._load_recents() if os.path.normcase(p) != key]
+        recents.insert(0, path)
+        self._save_recents(recents[:10])
+        self._rebuild_recent_menu()
+
+    def _open_recent(self, path: str):
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "File not found",
+                                f"This file no longer exists:\n{path}")
+            key = os.path.normcase(path)
+            self._save_recents([p for p in self._load_recents()
+                                if os.path.normcase(p) != key])
+            self._rebuild_recent_menu()
+            return
+        self._load_path(path)
+
+    def _clear_recents(self):
+        self._save_recents([])
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self):
+        menu = self._recent_menu
+        menu.clear()
+        recents = self._load_recents()
+        if not recents:
+            empty = menu.addAction("No recent files")
+            empty.setEnabled(False)
+            return
+        for path in recents:
+            # name — dir  (shown as one label; no global shortcut)
+            label = f"{os.path.basename(path)}   —   {os.path.dirname(path)}"
+            a = menu.addAction(label)
+            a.triggered.connect(lambda _checked=False, p=path: self._open_recent(p))
+        menu.addSeparator()
+        menu.addAction("Clear Recently Opened", self._clear_recents)
 
     def _open_in_editor(self):
         """Open the loaded .lua with the Windows default app (e.g. VSCode)."""
@@ -969,6 +1166,34 @@ class MainWindow(QWidget):
                 walk(c, c.steps)
         return res
 
+    def _scan_file_speffect(self, eid):
+        """[(lineno, line)] in the loaded file where `eid` appears in a
+        special-effect context (registration / interrupt key / HasSpecialEffectId)."""
+        token = re.compile(rf"\b{eid}\b")
+        hits = []
+        for n, ln in enumerate(self._loaded_text.splitlines(), 1):
+            if token.search(ln) and ("SpecialEffect" in ln
+                                     or "interruptEffectIdentifier" in ln):
+                hits.append((n, ln))
+        return hits
+
+    def _find_speffect_in_file(self, eid) -> bool:
+        """Offer to open the file at a line mentioning `eid`. Returns True if a
+        hit was found (and handled), False otherwise."""
+        hits = self._scan_file_speffect(eid)
+        if not hits:
+            return False
+        if len(hits) == 1:
+            self._open_at_line(self.loaded_path, hits[0][0])
+            return True
+        labels = [f"{n}: {ln.strip()[:90]}" for n, ln in hits]
+        choice, ok = QInputDialog.getItem(
+            self, "Find special effect",
+            f"{len(hits)} lines in the file — open at line:", labels, 0, False)
+        if ok:
+            self._open_at_line(self.loaded_path, hits[labels.index(choice)][0])
+        return True
+
     def _find_speffect_ui(self):
         eid, ok = QInputDialog.getInt(self, "Find by special-effect id",
                                       "Effect id:", 0, 0, 99_999_999)
@@ -976,8 +1201,12 @@ class MainWindow(QWidget):
             return
         matches = self._find_speffect(eid)
         if not matches:
+            # fall back to the file: catch ids that only live in the .lua (e.g. a
+            # registration line) and aren't loaded as a combo in memory.
+            if self._find_speffect_in_file(eid):
+                return
             self.status.setStyleSheet("color: #c0392b;")
-            self.status.setText(f"No combo uses special effect {eid}.")
+            self.status.setText(f"Special effect {eid} not found in combos or file.")
             return
         combo, node = matches[0]
         if len(matches) > 1:
@@ -1021,6 +1250,7 @@ class MainWindow(QWidget):
         # For a NEW Act/Kengeki, offer a cooldown (SetCoolTime) alongside the
         # REGIST_FUNC line. Cancel = register without a cooldown.
         cooldown = None
+        target = "TARGET_SELF"
         if (isinstance(self.seq, ComboSequence)
                 and self.seq.trigger_type in ("act_entry", "kengeki_move")):
             fam = "Act" if self.seq.trigger_type == "act_entry" else "Kengeki"
@@ -1030,7 +1260,19 @@ class MainWindow(QWidget):
                     self, "Cooldown", "Cooldown seconds (Cancel = none):",
                     15, 0, 999)
                 cooldown = val if ok else None
-        new_text, summary = writer.apply_sequence(text, self.seq, cooldown)
+        elif (isinstance(self.seq, ComboSequence)
+                and self.seq.trigger_type == "special_effect"
+                and generator.needs_registration(self.seq.trigger_id, "TARGET_SELF", text)
+                and generator.needs_registration(self.seq.trigger_id, "TARGET_ENE_0", text)):
+            # only ask when the effect isn't registered on either target yet
+            choice, ok = QInputDialog.getItem(
+                self, "Observe target",
+                "Register the special effect on which target?",
+                ["TARGET_SELF", "TARGET_ENE_0"], 0, False)
+            if not ok:
+                return
+            target = choice
+        new_text, summary = writer.apply_sequence(text, self.seq, cooldown, target)
         if new_text == text:
             QMessageBox.information(self, "Nothing written", "\n".join(summary)
                                     or "No change was produced.")
@@ -1043,9 +1285,18 @@ class MainWindow(QWidget):
         if ok != QMessageBox.Yes:
             return
         backup = writer.write_file(path, new_text, backup=True)
+        self._note_written(path, new_text)
         self.status.setStyleSheet("color: #27ae60;")
         self.status.setText(f"Wrote {os.path.basename(path)}"
                             + (f" (backup: {os.path.basename(backup)})" if backup else ""))
+
+    def _note_written(self, path: str, new_text: str):
+        """After writing `new_text` to `path`, make it the current file so
+        Find-in-file / conflict checks see the fresh content (not the stale
+        load-time snapshot), and record it in Open Recent."""
+        self.loaded_path = path
+        self._loaded_text = new_text
+        self._add_recent(path)
 
     def _target_text(self):
         """Return (path, text) for the write target (loaded file, else prompt),
@@ -1059,23 +1310,46 @@ class MainWindow(QWidget):
         with open(path, encoding="utf-8", errors="ignore") as f:
             return path, f.read()
 
-    def _commit_removal(self, path, text, new_text, summary):
-        """Confirm + back up + write a removal; update status."""
+    def _commit_removal(self, path, text, new_text, summary) -> bool:
+        """Confirm + back up + write a removal; update status. Returns True if
+        the file was actually written."""
         if new_text == text or not summary:
             QMessageBox.information(self, "Nothing removed",
                                     "No matching lines were found.")
-            return
+            return False
         ok = QMessageBox.question(
             self, "Remove from file",
             f"Target:\n{path}\n\nWill remove:\n  - " + "\n  - ".join(summary)
             + "\n\nA backup (.bak) will be made. Proceed?",
             QMessageBox.Yes | QMessageBox.No)
         if ok != QMessageBox.Yes:
-            return
+            return False
         backup = writer.write_file(path, new_text, backup=True)
+        self._note_written(path, new_text)
         self.status.setStyleSheet("color: #e67e22;")
         self.status.setText(f"Removed from {os.path.basename(path)}"
                             + (f" (backup: {os.path.basename(backup)})" if backup else ""))
+        return True
+
+    def _drop_current_combo(self):
+        """Remove the current combo from the in-memory list/dropdown, selecting
+        a neighbour (or a fresh default combo if none are left)."""
+        idx = _index_of(self.combos, self.seq)
+        if idx < 0:
+            return
+        uid = getattr(self.seq, "_uid", None)
+        self._originals.pop(uid, None)
+        self._history.pop(uid, None)
+        del self.combos[idx]
+        if not self.combos:
+            self.combos = [self._tag(ComboSequence(
+                name="my_combo", trigger_type="act_entry", trigger_id=50))]
+            self.seq = self.combos[0]
+        else:
+            self.seq = self.combos[min(idx, len(self.combos) - 1)]
+        self._refresh_selector()
+        self._sync_form_from_seq()
+        self.refresh()
 
     def _remove_from_file(self):
         """Delete the current combo from the target file: an Act/Kengeki (+ its
@@ -1100,7 +1374,8 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Remove from file",
                                     f"Cannot remove trigger type {self.seq.trigger_type}.")
             return
-        self._commit_removal(path, text, new_text, summary)
+        if self._commit_removal(path, text, new_text, summary):
+            self._drop_current_combo()   # also drop it from the dropdown
 
     def _remove_speffect_from_file(self):
         """Delete a special-effect registration (both TARGET_SELF and

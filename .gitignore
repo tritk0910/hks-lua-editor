@@ -5,3 +5,5 @@ __pycache__/
 *.bak
 build/
 dist/
+710300_battle.lua
+CLAUDE.md

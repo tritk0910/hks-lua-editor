@@ -108,6 +108,19 @@ It handles three combo families found in a real behavior file:
   edited region instead of regenerating the whole file.
 - Kengeki weight selector (`Goal.Kengeki_Activate`) is currently **view-only**.
 
+## Build a standalone .exe
+Package the app into a single Windows executable so it can be shared with people
+who don't have Python installed:
+1. Install the build tooling: `pip install -r requirements-dev.txt`
+   (PyInstaller + Pillow — Pillow lets PyInstaller turn the PNG into the exe icon).
+2. Build: `pyinstaller hks_lua_editor.spec`
+3. Run the result: `dist/HKS Lua Editor.exe`
+
+Notes: the bundle is ~60–100 MB (it embeds Qt); a one-file exe starts a bit
+slower than running from source because it unpacks on each launch; and some
+antivirus tools flag PyInstaller one-file exes as a false positive. `build/` and
+`dist/` are git-ignored.
+
 ## Development
 - Core logic (`models.py`, `generator.py`, `parser.py`, `visualizer.py`,
   `writer.py`, `dsas.py`) is fully UI-agnostic — the PySide6 UI in `ui/` can be

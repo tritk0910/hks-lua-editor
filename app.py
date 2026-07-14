@@ -27,10 +27,16 @@ if sys.platform == "win32":
 _ICON_CANDIDATES = ["assets/icon.png", "assets/icon.ico", "icon.png", "icon.ico"]
 
 
+def _resource_base() -> str:
+    """Directory to resolve bundled resources from. In a PyInstaller onefile
+    build the app is unpacked to sys._MEIPASS; otherwise it's this file's dir."""
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
 def _load_icon() -> QIcon:
-    here = os.path.dirname(os.path.abspath(__file__))
+    base = _resource_base()
     for rel in _ICON_CANDIDATES:
-        path = os.path.join(here, rel)
+        path = os.path.join(base, rel)
         if os.path.exists(path):
             return QIcon(path)
     return QIcon()  # empty -> default icon

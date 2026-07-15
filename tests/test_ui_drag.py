@@ -52,6 +52,47 @@ def _drag(window, objs):
 
 # --- where a drop lands -----------------------------------------------------
 
+# --- you drop between steps, not onto one -----------------------------------
+
+def test_step_rows_are_not_drop_targets(ladder):
+    """Clearing ItemIsDropEnabled is what makes Qt offer the insert line instead
+    of an "onto this row" drop (QAbstractItemViewPrivate::position)."""
+    window, head, inner = ladder
+    row, _ = _step_row(window, 100)
+    assert not (row.flags() & Qt.ItemIsDropEnabled)
+    assert row.flags() & Qt.ItemIsDragEnabled       # still draggable
+    assert row.flags() & Qt.ItemIsEditable          # still inline-editable
+
+
+def test_branch_and_else_rows_stay_drop_targets(ladder):
+    """Dropping onto a header is the only way into its body."""
+    window, head, inner = ladder
+    arm, _ = _row(window, lambda d: d["kind"] == "branch")
+    else_row, _ = _row(window, lambda d: d["kind"] == "else")
+    assert arm.flags() & Qt.ItemIsDropEnabled
+    assert else_row.flags() & Qt.ItemIsDropEnabled
+
+
+def test_dropping_onto_a_step_is_refused(ladder):
+    window, head, inner = ladder
+    tail = window.seq.steps[1]
+    before = list(head.true_branch)
+    _drag(window, [tail])
+    row, _ = _step_row(window, 100)
+    assert window._handle_drop(row, ON) is False
+    assert head.true_branch == before               # nothing moved
+    assert tail in window.seq.steps
+
+
+def test_selector_weight_rows_are_not_draggable_in_the_view(window, ref_lua):
+    from models import ActActivator
+    assert window._load_path(ref_lua)
+    window.seq = next(c for c in window.combos if isinstance(c, ActActivator))
+    window.refresh()
+    row, _ = _row(window, lambda d: d["kind"] == "weight")
+    assert not (row.flags() & Qt.ItemIsDragEnabled)
+
+
 def test_drop_onto_a_branch_header_enters_its_then_body(ladder):
     window, head, inner = ladder
     tail = window.seq.steps[1]                 # the top-level 900

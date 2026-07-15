@@ -374,8 +374,10 @@ class TreeEditMixin:
                 return data["obj"].true_branch, len(data["obj"].true_branch)
             if data["kind"] == "else":
                 return data["list"], len(data["list"])
-            # onto a step: treat as "just after it"
-            return data["list"], _index_of(data["list"], data["obj"]) + 1
+            # onto a step: refused — you drop *between* steps, not onto one.
+            # Qt shouldn't even offer this (step rows aren't drop-enabled), but
+            # the rule belongs here rather than resting on the flag alone.
+            return None
         if data["kind"] == "else":
             # there is no slot beside an else header — use its body
             return data["list"], 0 if position == QAbstractItemView.AboveItem \
@@ -526,11 +528,14 @@ class TreeEditMixin:
         # owner_list = the list that contains `owner`. Used to move items out.
         for obj in items_list:
             if isinstance(obj, Weight):
-                # selector row: `act[21]` + its weight (col 1), editable inline
+                # selector row: `act[21]` + its weight (col 1), editable inline.
+                # Not draggable: weights are written back by line number, so
+                # reordering one here would mean nothing on write.
                 table = "act" if isinstance(self.seq, ActActivator) else "kengeki"
                 node = QTreeWidgetItem(parent, [f"{table}[{obj.index}]",
                                                 str(obj.value)])
-                node.setFlags(node.flags() | Qt.ItemIsEditable)
+                node.setFlags((node.flags() | Qt.ItemIsEditable)
+                              & ~Qt.ItemIsDragEnabled & ~Qt.ItemIsDropEnabled)
                 self._store_payload(node, {"kind": "weight", "obj": obj,
                                            "list": items_list, "owner": owner,
                                            "owner_list": owner_list})
@@ -538,7 +543,14 @@ class TreeEditMixin:
                 extra = ", ".join(str(a) for a in obj.extra_args)
                 node = QTreeWidgetItem(parent, [obj.goal_type, str(obj.anim_id),
                                                 str(obj.priority), str(obj.distance), extra])
-                node.setFlags(node.flags() | Qt.ItemIsEditable)  # inline-editable
+                # Inline-editable, and NOT a drop target: a step has no body to
+                # drop into. Clearing ItemIsDropEnabled makes Qt turn an
+                # "onto this row" hover into Above/Below (see
+                # QAbstractItemViewPrivate::position), so dragging over a step
+                # only ever offers the insert line between rows. Its 2px
+                # above/below margin is otherwise near-impossible to hit.
+                node.setFlags((node.flags() | Qt.ItemIsEditable)
+                              & ~Qt.ItemIsDropEnabled)
                 self._store_payload(node, {"kind": "step", "obj": obj, "list": items_list,
                                            "owner": owner, "owner_list": owner_list})
             elif isinstance(obj, Branch):

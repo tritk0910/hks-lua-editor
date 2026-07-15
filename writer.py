@@ -18,7 +18,9 @@ import shutil
 from datetime import datetime
 
 import generator
-from models import Branch, ComboSequence, ComboStep, KengekiActivator
+from models import (
+    ActActivator, Branch, ComboSequence, ComboStep, Weight, is_activator,
+)
 from parser import iter_function_spans
 
 # Which enclosing Goal function holds the REGIST_FUNC / SetCoolTime block for a
@@ -299,8 +301,8 @@ def apply_sequence(text: str, seq, cooldown=None, target="TARGET_SELF"
     Act/Kengeki, also add its REGIST_FUNC line and — if `cooldown` (seconds) is
     given — a SetCoolTime line. For an interrupt, `target` is the observe target
     (TARGET_SELF or TARGET_ENE_0) used when registering the special effect."""
-    if isinstance(seq, KengekiActivator):
-        return text, ["Kengeki_Activate write is not supported yet (view only)."]
+    if is_activator(seq):
+        return apply_activator(text, seq)
     if not isinstance(seq, ComboSequence):
         return text, [f"cannot write {type(seq).__name__}"]
 
@@ -323,6 +325,144 @@ def apply_sequence(text: str, seq, cooldown=None, target="TARGET_SELF"
     else:
         summary.append(f"unknown trigger_type: {seq.trigger_type}")
     return text, summary
+
+
+# --- selector weight tables (Goal.Activate / Goal.Kengeki_Activate) --------
+
+def _flatten_weights(items) -> list:
+    """Weights in document order (a branch's true side precedes its false side,
+    which is how an if/elseif/else ladder reads top-to-bottom)."""
+    out = []
+    for it in items:
+        if isinstance(it, Weight):
+            out.append(it)
+        elif isinstance(it, Branch):
+            out.extend(_flatten_weights(it.true_branch))
+            out.extend(_flatten_weights(it.false_branch))
+    return out
+
+
+def _activator_parts(activator):
+    """(table_name, weight_items) for either activator type."""
+    if isinstance(activator, ActActivator):
+        return "act", _flatten_weights(activator.items)
+    items = []
+    for block in activator.blocks:
+        items.extend(_flatten_weights(block.items))
+    return "kengeki", items
+
+
+def _scan_weight_lines(text: str, table: str) -> dict:
+    """{file_line: (indent, index, value_text)} for every `<table>[i] = v`
+    assignment. SetCoolTime lines share the shape but are cooldowns, not
+    weights."""
+    pat = re.compile(rf"^(\s*){table}\[(\d+)\]\s*=\s*(.+?)\s*$")
+    found = {}
+    for n, line in enumerate(text.split("\n"), 1):
+        m = pat.match(line)
+        if m and "SetCoolTime(" not in line:
+            found[n] = (m.group(1), int(m.group(2)), m.group(3))
+    return found
+
+
+def apply_activator(text: str, activator) -> tuple[str, list[str]]:
+    """Write an edited weight table back by splicing individual LINES.
+
+    Deliberately not a re-generate: the selector regions hold comments and
+    statements the model doesn't carry (e.g. `arg1:SetNumber(2, 0)`), and
+    rendering the region from the model would silently delete them. Only lines
+    for weights that actually changed are touched.
+
+    Only lines in `activator.owned_lines` are ever touched: these parsers skip
+    some weight assignments (Kengeki_Activate's trailing veto blocks), and
+    treating "on disk but not in the model" as a deletion would wipe them.
+
+    Refuses to write (returning a warning) if the model no longer lines up with
+    the file, rather than risk editing the wrong line.
+    """
+    table, weights = _activator_parts(activator)
+    owned = getattr(activator, "owned_lines", set())
+    on_disk = {n: v for n, v in _scan_weight_lines(text, table).items()
+               if n in owned}
+    summary: list[str] = []
+
+    # integrity: every tracked weight must still sit on its line, same index
+    for w in weights:
+        if w.line is None:
+            continue
+        if w.line not in on_disk:
+            return text, [f"{table}[{w.index}]: line {w.line} is no longer a "
+                          f"{table}[] assignment — reload the file before writing."]
+        if on_disk[w.line][1] != w.index:
+            return text, [f"line {w.line} holds {table}[{on_disk[w.line][1]}], "
+                          f"expected {table}[{w.index}] — reload the file before writing."]
+
+    # (line, rank, new_text_or_None) — rank orders ops landing on the same line
+    ops: list[tuple[int, int, str | None]] = []
+    tracked = {w.line for w in weights if w.line is not None}
+    for w in weights:
+        if w.line is None:
+            continue
+        indent, _idx, old_value = on_disk[w.line]
+        if str(w.value) != old_value:
+            ops.append((w.line, 1, f"{indent}{table}[{w.index}] = {w.value}"))
+            summary.append(f"{table}[{w.index}] = {w.value} (was {old_value}, line {w.line})")
+    for line in on_disk:
+        if line not in tracked:
+            ops.append((line, 1, None))   # removed in the editor
+            summary.append(f"remove {table}[{on_disk[line][1]}] (line {line})")
+
+    # new weights (line=None) go after the last existing weight of their block
+    for after, weight in _plan_inserts(activator, table):
+        if after is None:
+            summary.append(f"cannot place new {table}[{weight.index}] — add it "
+                           f"next to an existing weight")
+            continue
+        indent = on_disk.get(after, ("    ",))[0]
+        ops.append((after, 0, f"{indent}{table}[{weight.index}] = {weight.value}"))
+        summary.append(f"add {table}[{weight.index}] = {weight.value} (after line {after})")
+
+    if not ops:
+        return text, summary
+    lines = text.split("\n")
+    # apply bottom-up: editing/deleting/inserting low lines first would shift
+    # every line number above them (rank 0 = insert, applied before a replace
+    # that targets the same line)
+    for line, rank, new_text in sorted(ops, reverse=True):
+        if rank == 0:
+            lines.insert(line, new_text)      # after `line` (1-based)
+        elif new_text is None:
+            del lines[line - 1]
+        else:
+            lines[line - 1] = new_text
+    return "\n".join(lines), summary
+
+
+def _plan_inserts(activator, table: str) -> list:
+    """[(after_line, weight)] for weights added in the editor (line is None).
+
+    A new weight is placed after the last already-on-disk weight of the same
+    block, so it lands inside the same condition. after_line is None when the
+    block has none to anchor to.
+    """
+    out = []
+
+    def walk(items):
+        anchor = max((w.line for w in items
+                      if isinstance(w, Weight) and w.line is not None), default=None)
+        for it in items:
+            if isinstance(it, Weight) and it.line is None:
+                out.append((anchor, it))
+            elif isinstance(it, Branch):
+                walk(it.true_branch)
+                walk(it.false_branch)
+
+    if isinstance(activator, ActActivator):
+        walk(activator.items)
+    else:
+        for block in activator.blocks:
+            walk(block.items)
+    return out
 
 
 # --- remove from file -----------------------------------------------------

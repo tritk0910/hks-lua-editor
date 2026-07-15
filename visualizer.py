@@ -12,12 +12,13 @@ level under it.
 from __future__ import annotations
 
 from models import (
+    ActActivator,
     BoolNode,
     Branch,
     ComboSequence,
     ComboStep,
     KengekiActivator,
-    KengekiWeight,
+    Weight,
     unchain_branch,
 )
 
@@ -55,8 +56,12 @@ def _step_leaf(step: ComboStep) -> str:
     return f"[{step.anim_id} {step.goal_type}]"
 
 
-def _weight_leaf(weight: KengekiWeight) -> str:
+def _weight_leaf(weight: Weight) -> str:
     return f"[kengeki {weight.index} = {weight.value}]"
+
+
+def _act_weight_leaf(weight: Weight) -> str:
+    return f"[act {weight.index} = {weight.value}]"
 
 
 def _render_ladder(items, depth: int, lines: list[str], leaf_fn) -> None:
@@ -95,4 +100,11 @@ def visualize_kengeki(activator: KengekiActivator) -> str:
     for block in activator.blocks:
         lines.append(f"{INDENT}effect {block.effect_id}:")
         _render_ladder(block.items, depth=2, lines=lines, leaf_fn=_weight_leaf)
+    return "\n".join(lines)
+
+
+def visualize_act_activator(activator: ActActivator) -> str:
+    """Ladder diagram of Goal.Activate's act-weight region."""
+    lines = ["Activate — act weights"]
+    _render_ladder(activator.items, depth=1, lines=lines, leaf_fn=_act_weight_leaf)
     return "\n".join(lines)

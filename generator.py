@@ -17,7 +17,7 @@ from models import (
     ComboSequence,
     ComboStep,
     KengekiActivator,
-    KengekiWeight,
+    Weight,
     unchain_branch,
 )
 
@@ -206,29 +206,39 @@ def generate_kengeki_move(seq: ComboSequence) -> str:
 
 # --- Kengeki_Activate selector --------------------------------------------
 
-def _render_kengeki_items(items, indent: str) -> str:
-    """Render list[KengekiWeight | Branch] into Lua lines (mirrors render_items
-    but the leaves are `kengeki[index] = value` assignments)."""
+def _render_kengeki_items(items, indent: str, table: str = "kengeki") -> str:
+    """Render list[Weight | Branch] into Lua lines (mirrors render_items but the
+    leaves are `<table>[index] = value` assignments — `kengeki` or `act`)."""
     lines = []
     for item in items:
-        if isinstance(item, KengekiWeight):
-            lines.append(f"{indent}kengeki[{item.index}] = {item.value}")
+        if isinstance(item, Weight):
+            lines.append(f"{indent}{table}[{item.index}] = {item.value}")
         elif isinstance(item, Branch):
-            # Kengeki_Activate reads values via arg1 (arg2 is the step object)
+            # the selectors read values via arg1 (arg2 is the step object)
             arms, else_items = unchain_branch(item, items)
             for k, (arm, _lst) in enumerate(arms):
                 kw = "if" if k == 0 else "elseif"
                 lines.append(f"{indent}{kw} {_branch_condition(arm, 'kengeki_activate')} then")
-                body = _render_kengeki_items(arm.true_branch, indent + INDENT)
+                body = _render_kengeki_items(arm.true_branch, indent + INDENT, table)
                 if body:
                     lines.append(body)
             if else_items:
                 lines.append(f"{indent}else")
-                lines.append(_render_kengeki_items(else_items, indent + INDENT))
+                lines.append(_render_kengeki_items(else_items, indent + INDENT, table))
             lines.append(f"{indent}end")
         else:
-            raise TypeError(f"kengeki item must be KengekiWeight or Branch, got {type(item)!r}")
+            raise TypeError(f"weight item must be Weight or Branch, got {type(item)!r}")
     return "\n".join(lines)
+
+
+def generate_act_activate(activator) -> str:
+    """The `act[i] = <weight>` region of Goal.Activate, for PREVIEW only.
+
+    Writing this back is done by splicing individual weight lines
+    (writer.apply_activator) — regenerating the region would drop comments and
+    statements the model doesn't carry.
+    """
+    return _render_kengeki_items(activator.items, INDENT, table="act")
 
 
 def generate_kengeki_activate(activator: KengekiActivator) -> str:

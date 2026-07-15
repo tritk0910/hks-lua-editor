@@ -37,7 +37,9 @@ from PySide6.QtWidgets import (
 import generator
 import visualizer
 import writer
-from models import Branch, ComboSequence, ComboStep, KengekiActivator
+from models import (
+    ActActivator, Branch, ComboSequence, ComboStep, KengekiActivator,
+)
 from ui.combo_dialog import ComboDialog
 from ui.helpers import TRIGGER_TYPES, _combo_label, _index_of
 from ui.lua_highlighter import LuaHighlighter
@@ -547,6 +549,8 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         try:
             if isinstance(self.seq, KengekiActivator):
                 lua = generator.generate_kengeki_activate(self.seq)
+            elif isinstance(self.seq, ActActivator):
+                lua = generator.generate_act_activate(self.seq)
             elif self.seq.trigger_type == "act_entry":
                 lua = generator.generate_act(self.seq)
             elif self.seq.trigger_type == "kengeki_move":
@@ -563,6 +567,8 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         try:
             if isinstance(self.seq, KengekiActivator):
                 diagram = visualizer.visualize_kengeki(self.seq)
+            elif isinstance(self.seq, ActActivator):
+                diagram = visualizer.visualize_act_activator(self.seq)
             else:
                 diagram = visualizer.visualize(self.seq)
             self.diagram_view.setPlainText(diagram)

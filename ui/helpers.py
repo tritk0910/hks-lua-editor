@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from models import KengekiActivator
+from models import ActActivator, KengekiActivator
 
 TRIGGER_TYPES = ["act_entry", "special_effect", "kengeki_move"]
 
@@ -14,6 +14,18 @@ def _parse_val(text: str):
         return int(text)
     except ValueError:
         return text
+
+
+def _count_weights(items) -> int:
+    """How many weight assignments are in an activator's item tree."""
+    from models import Branch, Weight
+    n = 0
+    for it in items:
+        if isinstance(it, Weight):
+            n += 1
+        elif isinstance(it, Branch):
+            n += _count_weights(it.true_branch) + _count_weights(it.false_branch)
+    return n
 
 
 def _index_of(lst, obj) -> int:
@@ -29,6 +41,8 @@ def _index_of(lst, obj) -> int:
 def _combo_label(item) -> str:
     if isinstance(item, KengekiActivator):
         return f"Kengeki_Activate ({len(item.blocks)} blocks)"
+    if isinstance(item, ActActivator):
+        return f"Activate — act weights ({_count_weights(item.items)})"
     kinds = {"act_entry": "Act", "special_effect": "Interrupt",
              "kengeki_move": "Kengeki"}
     kind = kinds.get(item.trigger_type, item.trigger_type)

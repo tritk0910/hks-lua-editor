@@ -15,14 +15,15 @@ import re
 from dataclasses import dataclass, field
 
 from models import (
+    ActActivator,
     BoolNode,
     Branch,
     ComboSequence,
     ComboStep,
     KengekiActivator,
     KengekiEffectBlock,
-    KengekiWeight,
     Term,
+    Weight,
 )
 
 
@@ -42,31 +43,40 @@ def _strip_comment(line: str) -> str:
     return line[:idx] if idx != -1 else line
 
 
-def _logical_lines(text: str) -> list[tuple[int, str]]:
+def _logical_lines(text: str, line_offset: int | None = None) -> list[tuple]:
     """Return (indent, text) for each *logical* line: comments stripped, blank
     lines dropped, and statements that span physical lines (unbalanced parens,
     e.g. a wrapped `:TimingSetNumber(...)`) joined into one.
+
+    With `line_offset` given, each entry becomes (indent, text, lineno) where
+    lineno is 1-based and counted from `line_offset` — i.e. pass the line the
+    `text` starts on within the file to get file line numbers. The writer needs
+    these to edit one specific assignment (see models.Weight.line).
     """
-    out: list[tuple[int, str]] = []
+    out: list[tuple] = []
     buf = ""
     indent = 0
     depth = 0
-    for raw in text.splitlines():
+    start_line = 0
+    for n, raw in enumerate(text.splitlines()):
         stripped_comment = _strip_comment(raw)
         if not buf:
             if not stripped_comment.strip():
                 continue
             indent = len(stripped_comment) - len(stripped_comment.lstrip())
             buf = stripped_comment.strip()
+            start_line = n
         else:
             buf += " " + stripped_comment.strip()
         depth += stripped_comment.count("(") - stripped_comment.count(")")
         if depth <= 0:
-            out.append((indent, buf))
+            out.append((indent, buf) if line_offset is None
+                       else (indent, buf, line_offset + start_line))
             buf = ""
             depth = 0
     if buf:
-        out.append((indent, buf))
+        out.append((indent, buf) if line_offset is None
+                   else (indent, buf, line_offset + start_line))
     return out
 
 
@@ -134,7 +144,8 @@ def _build_local_table(lines: list[tuple[int, str]]) -> dict:
     anything else -> the raw expression string.
     """
     table: dict = {}
-    for _indent, text in lines:
+    for entry in lines:                    # (indent, text[, lineno])
+        text = entry[1]
         m = re.match(r"^local\s+(local\d+)\s*=\s*(.+)$", text)
         if not m:
             continue
@@ -306,32 +317,49 @@ def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
     return branch
 
 
-def _addsubgoal_leaf(text, locals_, warnings):
+def _addsubgoal_leaf(text, locals_, warnings, lineno=None):
     """Default leaf parser: an `argX:AddSubGoal(...)` line -> ComboStep."""
     if "AddSubGoal(" in text:
         return _parse_addsubgoal(text, locals_, warnings)
     return None
 
 
-def _kengeki_leaf(text, locals_, warnings):
-    """Leaf parser for Kengeki_Activate: `kengeki[index] = value` -> KengekiWeight."""
-    m = re.match(r"^kengeki\[(\d+)\]\s*=\s*(.+)$", text)
-    if m:
-        return KengekiWeight(index=int(m.group(1)),
-                             value=_resolve(m.group(2), locals_))
-    return None
+def _weight_leaf(table: str):
+    """Build a leaf parser for `<table>[index] = value` weight assignments.
+
+    `SetCoolTime` lines share that shape (`act[1] = SetCoolTime(...)`) but are
+    cooldowns, not weights — they must not be picked up.
+    """
+    pattern = re.compile(rf"^{table}\[(\d+)\]\s*=\s*(.+)$")
+
+    def leaf(text, locals_, warnings, lineno=None):
+        m = pattern.match(text)
+        if m and "SetCoolTime(" not in text:
+            return Weight(index=int(m.group(1)),
+                          value=_resolve(m.group(2), locals_), line=lineno)
+        return None
+
+    return leaf
+
+
+_kengeki_leaf = _weight_leaf("kengeki")
+_act_leaf = _weight_leaf("act")
 
 
 def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf):
     """Recursively parse logical lines into list[<leaf> | Branch].
 
-    `leaf(text, locals_, warnings)` returns a leaf item for a recognised
-    statement line, else None. Returns (items, next_index). Stops at a dedent
-    below base_indent or at an enclosing `else` / `elseif` / `end`.
+    `leaf(text, locals_, warnings, lineno)` returns a leaf item for a
+    recognised statement line, else None. Returns (items, next_index). Stops at
+    a dedent below base_indent or at an enclosing `else` / `elseif` / `end`.
+
+    `lines` entries are (indent, text) or (indent, text, lineno) — see
+    _logical_lines. lineno is handed to the leaf (None when not tracked).
     """
     items = []
     while i < len(lines):
-        indent, text = lines[i]
+        entry = lines[i]
+        indent, text = entry[0], entry[1]
         if indent < base_indent:
             break
         head = text.split(None, 1)[0] if text else ""
@@ -342,7 +370,7 @@ def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf
             if branch is not None:
                 items.append(branch)
             continue
-        item = leaf(text, locals_, warnings)
+        item = leaf(text, locals_, warnings, entry[2] if len(entry) > 2 else None)
         if item is not None:
             items.append(item)
         i += 1
@@ -406,7 +434,8 @@ def _iter_functions(text: str):
 
 def _parse_approach(lines, locals_):
     """Return the 7 resolved Approach_Act_Flex params, or None if absent."""
-    for _indent, text in lines:
+    for entry in lines:                    # (indent, text[, lineno])
+        text = entry[1]
         if text.startswith("Approach_Act_Flex("):
             inside, _ = _balanced_call(text, text.index("("))
             args = _split_top_level(inside)
@@ -436,17 +465,18 @@ def _parse_act(name: str, body: str, warnings: list) -> ComboSequence:
                          steps=steps, approach=approach)
 
 
-def _parse_kengeki_activate(body: str, warnings: list) -> KengekiActivator:
+def _parse_kengeki_activate(body: str, warnings: list,
+                            line_offset: int | None = None) -> KengekiActivator:
     """Parse the `if/elseif local0 == <effect_id> then` chain of
     Goal.Kengeki_Activate into a KengekiActivator. The `== 0` guard block and
     the trailing REGIST_FUNC / Common_Kengeki_Activate boilerplate are ignored.
     """
-    lines = _logical_lines(body)[1:]   # drop the header line
+    lines = _logical_lines(body, line_offset)[1:]   # drop the header line
     locals_ = _build_local_table(lines)
     activator = KengekiActivator()
     i = 0
     while i < len(lines):
-        indent, text = lines[i]
+        indent, text = lines[i][0], lines[i][1]
         m = re.match(r"^(?:if|elseif) local0 == (\d+) then$", text)
         if not m:
             i += 1
@@ -457,7 +487,71 @@ def _parse_kengeki_activate(body: str, warnings: list) -> KengekiActivator:
         if eid != 0:   # `== 0` is the "no kengeki effect" guard, not a block
             activator.blocks.append(KengekiEffectBlock(effect_id=eid, items=items))
         i = j
+    activator.owned_lines = _weight_lines(
+        [it for b in activator.blocks for it in b.items])
     return activator
+
+
+def _weight_lines(items) -> set:
+    """The file lines the weights in `items` came from (see Weight.line)."""
+    lines = set()
+    for it in items:
+        if isinstance(it, Weight):
+            if it.line is not None:
+                lines.add(it.line)
+        elif isinstance(it, Branch):
+            lines |= _weight_lines(it.true_branch) | _weight_lines(it.false_branch)
+    return lines
+
+
+def _has_weight(lines, i, base_indent, table: str) -> bool:
+    """True if the block starting at `lines[i]` contains a `<table>[n] = ...`
+    assignment (ignoring SetCoolTime, which only looks like one)."""
+    pat = re.compile(rf"^{table}\[\d+\]\s*=")
+    for j in range(i, len(lines)):
+        indent, text = lines[j][0], lines[j][1]
+        if j > i and indent <= base_indent and not text.startswith(("elseif", "else", "end")):
+            break
+        if pat.match(text) and "SetCoolTime(" not in text:
+            return True
+    return False
+
+
+def activate_region(lines, table: str = "act") -> tuple[int, int]:
+    """(start, end) indices of the weight region inside Goal.Activate's logical
+    lines: from the first top-level statement that assigns a weight, up to the
+    cooldown block that follows it.
+
+    The end MUST be pinned to the SetCoolTime block: _parse_block does not stop
+    on its own and would otherwise run on into the REGIST_FUNC tail.
+    """
+    start, end = None, len(lines)
+    for i, entry in enumerate(lines):
+        indent, text = entry[0], entry[1]
+        if "= SetCoolTime(" in text:
+            end = i
+            break
+        if start is None and indent == 4 and _has_weight(lines, i, indent, table):
+            start = i
+    return (0, 0) if start is None else (start, end)
+
+
+def _parse_activate(body: str, warnings: list,
+                    line_offset: int | None = None) -> ActActivator:
+    """Parse the `act[i] = <weight>` region of Goal.Activate.
+
+    Unlike Kengeki_Activate there is no `local0 == id` keying — the arms are
+    arbitrary conditions — so this is the plain statement list of the region
+    (the main if/elseif ladder plus the standalone veto blocks after it).
+    """
+    lines = _logical_lines(body, line_offset)
+    locals_ = _build_local_table(lines)
+    start, end = activate_region(lines, "act")
+    if start == end:
+        return ActActivator()
+    items, _ = _parse_block(lines[start:end], 0, 4, locals_, warnings,
+                            leaf=_act_leaf)
+    return ActActivator(items=items, owned_lines=_weight_lines(items))
 
 
 def _parse_interrupt(body: str, warnings: list) -> list:
@@ -491,13 +585,21 @@ def _parse_interrupt(body: str, warnings: list) -> list:
 
 def parse_file(text: str) -> ParseResult:
     result = ParseResult()
-    for name, body in _iter_functions(text):
+    for name, start, _end in iter_function_spans(text):
+        body = text[start:_end]
+        # 1-based file line the body starts on, so weights carry file line
+        # numbers the writer can splice by
+        offset = text.count("\n", 0, start) + 1
         if re.match(r"Act\d+$", name):
             result.sequences.append(_parse_act(name, body, result.warnings))
         elif re.match(r"Kengeki\d+$", name):
             result.sequences.append(_parse_kengeki_move(name, body, result.warnings))
         elif name == "Kengeki_Activate":
-            result.activators.append(_parse_kengeki_activate(body, result.warnings))
+            result.activators.append(
+                _parse_kengeki_activate(body, result.warnings, offset))
+        elif name == "Activate":
+            result.activators.append(
+                _parse_activate(body, result.warnings, offset))
         elif name == "Interrupt":
             result.sequences.extend(_parse_interrupt(body, result.warnings))
     return result

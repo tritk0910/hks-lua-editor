@@ -16,11 +16,17 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QMessageBox, QTreeWidgetItem
 
-from models import Branch, ComboStep, unchain_branch
+from models import (
+    ActActivator, Branch, ComboStep, KengekiActivator, Weight, unchain_branch,
+)
 from visualizer import condition_text
 from ui.branch_dialog import BranchDialog
 from ui.helpers import _index_of, _parse_val
 from ui.step_dialog import StepDialog
+
+_COMBO_HEADERS = ["Structure", "Anim", "Prio", "Dist", "Extra"]
+# the selectors only have a weight per row — the combo columns are meaningless
+_WEIGHT_HEADERS = ["Structure", "Weight", "", "", ""]
 
 
 class TreeEditMixin:
@@ -148,8 +154,8 @@ class TreeEditMixin:
 
     def _edit_selected(self):
         data = self._selected_obj_data()
-        if data is None:
-            return
+        if data is None or data["kind"] == "weight":
+            return          # weights are edited inline in the Weight column
         obj = data["obj"]
         lst = data["list"]
         if isinstance(obj, ComboStep):
@@ -172,6 +178,8 @@ class TreeEditMixin:
         obj = data["obj"]
         lst = data["list"]
         clone = copy.deepcopy(obj)
+        if isinstance(clone, Weight):
+            clone.line = None    # a copy is a NEW assignment, not the same line
         lst.insert(_index_of(lst, obj) + 1, clone)
         self.refresh(select=clone)
 
@@ -355,10 +363,16 @@ class TreeEditMixin:
     # --- inline editing ----------------------------------------------------
 
     def _on_item_changed(self, item, column):
-        """Commit an inline cell edit back to the ComboStep."""
+        """Commit an inline cell edit back to the ComboStep / Weight."""
         if self._building:
             return
         data = self._payload_of(item)
+        if data and data["kind"] == "weight":
+            if column == 1:
+                self._push_undo()
+                data["obj"].value = _parse_val(item.text(1))
+                self._refresh_output()
+            return
         if not data or data["kind"] != "step":
             return
         self._push_undo()
@@ -404,11 +418,24 @@ class TreeEditMixin:
         try:
             self.tree.clear()
             self._payloads = []
+            root = self.tree.invisibleRootItem()
             if self._is_combo():
-                self._add_tree_items(self.seq.steps, self.tree.invisibleRootItem())
-                self.tree.expandAll()
-                if select is not None:
-                    self._select_obj(select)
+                self.tree.setHeaderLabels(_COMBO_HEADERS)
+                self._add_tree_items(self.seq.steps, root)
+            elif isinstance(self.seq, ActActivator):
+                self.tree.setHeaderLabels(_WEIGHT_HEADERS)
+                self._add_tree_items(self.seq.items, root)
+            elif isinstance(self.seq, KengekiActivator):
+                self.tree.setHeaderLabels(_WEIGHT_HEADERS)
+                for block in self.seq.blocks:
+                    node = QTreeWidgetItem(root, [f"effect {block.effect_id}"])
+                    node.setForeground(0, QColor("#2980b9"))
+                    self._add_tree_items(block.items, node)
+            else:
+                return
+            self.tree.expandAll()
+            if select is not None:
+                self._select_obj(select)
         finally:
             self._building = False
 
@@ -421,7 +448,16 @@ class TreeEditMixin:
         # owner = the branch whose body `items_list` is (None at top level);
         # owner_list = the list that contains `owner`. Used to move items out.
         for obj in items_list:
-            if isinstance(obj, ComboStep):
+            if isinstance(obj, Weight):
+                # selector row: `act[21]` + its weight (col 1), editable inline
+                table = "act" if isinstance(self.seq, ActActivator) else "kengeki"
+                node = QTreeWidgetItem(parent, [f"{table}[{obj.index}]",
+                                                str(obj.value)])
+                node.setFlags(node.flags() | Qt.ItemIsEditable)
+                self._store_payload(node, {"kind": "weight", "obj": obj,
+                                           "list": items_list, "owner": owner,
+                                           "owner_list": owner_list})
+            elif isinstance(obj, ComboStep):
                 extra = ", ".join(str(a) for a in obj.extra_args)
                 node = QTreeWidgetItem(parent, [obj.goal_type, str(obj.anim_id),
                                                 str(obj.priority), str(obj.distance), extra])

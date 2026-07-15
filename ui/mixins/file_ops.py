@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 import generator
 import writer
-from models import ComboSequence, KengekiActivator
+from models import ComboSequence, is_activator
 from parser import parse_file
 
 
@@ -89,7 +89,7 @@ class FileOpsMixin:
             self._originals[it._uid] = copy.deepcopy(it)
         # drop untouched placeholder combos (default my_combo / New with no steps)
         self.combos = [c for c in self.combos
-                       if isinstance(c, KengekiActivator) or c.steps] + items
+                       if is_activator(c) or c.steps] + items
         self.seq = items[0]
         self._refresh_selector()
         self._sync_form_from_seq()

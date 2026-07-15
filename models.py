@@ -130,18 +130,39 @@ class ComboSequence:
                                   # int or resolved expression string; None if absent
 
 
-# --- Kengeki (sword-clash) selector: Goal.Kengeki_Activate ------------------
-# A different structure from combos: instead of AddSubGoal chains, it assigns
-# weights `kengeki[index] = value` under a condition tree, keyed by the value
-# of `ReturnKengekiSpecialEffect`. The condition tree reuses `Branch` (its
-# true/false lists then hold KengekiWeight leaves instead of ComboStep).
+# --- Move selectors: Goal.Activate and Goal.Kengeki_Activate ----------------
+# A different structure from combos: instead of AddSubGoal chains, these assign
+# weights (`act[index] = value` / `kengeki[index] = value`) under a condition
+# tree. The condition tree reuses `Branch` (its true/false lists then hold
+# Weight leaves instead of ComboStep). Kengeki's chain is keyed by the value of
+# `ReturnKengekiSpecialEffect`; Activate's arms are arbitrary conditions.
+#
+# `owned_lines` is the set of file lines the parser actually took its weights
+# from, and it is what the writer is allowed to touch. It matters because these
+# parsers do NOT cover every weight line in the function — Kengeki_Activate has
+# standalone `if ... then kengeki[x] = 0 end` veto blocks after the local0
+# chain that it skips. Without an explicit ownership set, the writer would read
+# "line has a weight but the model doesn't" as "the user deleted it" and
+# silently delete those lines.
 
 @dataclass
-class KengekiWeight:
-    """One `kengeki[index] = value` assignment (a move's selection weight)."""
+class Weight:
+    """One `act[index] = value` / `kengeki[index] = value` assignment — how
+    likely that move is to be picked.
+
+    `line` is the 1-based line in the source FILE this was parsed from, and is
+    what lets the writer edit exactly this assignment: the same weight can
+    appear more than once (e.g. `act[21] = 100` on two different lines), so
+    matching by position or value would target the wrong one. None means the
+    weight is new (added in the editor) and has no line yet.
+    """
 
     index: int
     value: int | str
+    line: int | None = None
+
+
+KengekiWeight = Weight    # the original name, kept for existing callers
 
 
 @dataclass
@@ -149,7 +170,7 @@ class KengekiEffectBlock:
     """One `local0 == <effect_id>` branch of Goal.Kengeki_Activate."""
 
     effect_id: int       # e.g. 200200 — a ReturnKengekiSpecialEffect value
-    items: list = field(default_factory=list)  # list[KengekiWeight | Branch]
+    items: list = field(default_factory=list)  # list[Weight | Branch]
 
 
 @dataclass
@@ -157,6 +178,28 @@ class KengekiActivator:
     """The whole Goal.Kengeki_Activate selector: an ordered if/elseif chain."""
 
     blocks: list = field(default_factory=list)  # list[KengekiEffectBlock]
+    owned_lines: set = field(default_factory=set)
+
+
+@dataclass
+class ActActivator:
+    """The `act[i] = weight` region of Goal.Activate: the main if/elseif ladder
+    plus the standalone `if ... then act[x] = 0 end` veto blocks after it.
+
+    Unlike Kengeki_Activate there is no effect-id keying — the arms are plain
+    conditions, so this is just an ordered list at the top level.
+    """
+
+    items: list = field(default_factory=list)  # list[Weight | Branch]
+    owned_lines: set = field(default_factory=set)
+
+
+#: the selector tables — weight editors, not AddSubGoal combos
+ACTIVATOR_TYPES = (KengekiActivator, ActActivator)
+
+
+def is_activator(obj) -> bool:
+    return isinstance(obj, ACTIVATOR_TYPES)
 
 
 def unchain_branch(branch: Branch, parent_list: list):

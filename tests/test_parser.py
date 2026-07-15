@@ -199,17 +199,22 @@ def test_kengeki02_chained_timing(parsed):
 
 # --- Slice 3b: Kengeki_Activate selector ----------------------------------
 
+def _kengeki_activator(parsed):
+    from models import KengekiActivator
+    acts = [a for a in parsed.activators if isinstance(a, KengekiActivator)]
+    assert len(acts) == 1
+    return acts[0]
+
+
 def _block(parsed, eid):
-    assert len(parsed.activators) == 1
-    for b in parsed.activators[0].blocks:
+    for b in _kengeki_activator(parsed).blocks:
         if b.effect_id == eid:
             return b
     raise AssertionError(f"kengeki effect block {eid} not found")
 
 
 def test_activator_parsed_once(parsed):
-    assert len(parsed.activators) == 1
-    eids = {b.effect_id for b in parsed.activators[0].blocks}
+    eids = {b.effect_id for b in _kengeki_activator(parsed).blocks}
     # 0 (guard) must be excluded; the real effect ids present
     assert 0 not in eids
     assert {200200, 200201, 200210, 200211}.issubset(eids)

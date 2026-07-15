@@ -198,12 +198,19 @@ class TreeEditMixin:
         self.refresh(select=clone)
 
     def _remove_selected(self):
-        data = self._selected_obj_data()
-        if data is None:
-            return
+        """Remove every selected row, not just the focused one."""
+        sel = [d for d in (self._payload_of(it) for it in self.tree.selectedItems())
+               if d and d["kind"] in ("step", "branch", "weight")]
+        if not sel:
+            data = self._selected_obj_data()   # nothing selected: use the current row
+            if data is None:
+                return
+            sel = [data]
         self._push_undo()
-        lst = data["list"]
-        del lst[_index_of(lst, data["obj"])]
+        for data in sel:
+            i = _index_of(data["list"], data["obj"])
+            if i >= 0:      # already gone with an enclosing branch — never del [-1]
+                del data["list"][i]
         self.refresh()
 
     def _move_selected(self, delta: int):
@@ -227,50 +234,31 @@ class TreeEditMixin:
             self._move_branch(data, delta)
 
     def _move_block(self, sel, delta):
-        """Move several selected steps (same list) together as one block."""
+        """Move several selected steps (same list) together as one block.
+
+        Uses the same destination rules as a single step: the anchor is the row
+        the block leads with in the direction of travel, so a block walks into
+        elseif/else bodies exactly like one step does.
+        """
         lst = sel[0]["list"]
         objs = [d["obj"] for d in sorted(sel, key=lambda d: _index_of(lst, d["obj"]))]
-        idxs = [_index_of(lst, o) for o in objs]
-        if delta > 0:                       # DOWN
-            after = idxs[-1] + 1
-            if after < len(lst):
-                nxt = lst[after]
-                for o in objs:
-                    lst.remove(o)
-                if isinstance(nxt, Branch):
-                    nxt.true_branch[0:0] = objs          # into the branch body
-                else:
-                    p = _index_of(lst, nxt) + 1
-                    lst[p:p] = objs                      # past the next step
-            else:
-                if not self._block_pop_out(sel, objs, lst, delta):
-                    return
-        else:                               # UP
-            before = idxs[0] - 1
-            if before >= 0:
-                prv = lst[before]
-                for o in objs:
-                    lst.remove(o)
-                if isinstance(prv, Branch):
-                    prv.true_branch.extend(objs)         # into the branch body end
-                else:
-                    p = _index_of(lst, prv)
-                    lst[p:p] = objs                      # before the previous step
-            else:
-                if not self._block_pop_out(sel, objs, lst, delta):
-                    return
+        anchor_obj = objs[-1] if delta > 0 else objs[0]
+        anchor = next((d for d in sel if d["obj"] is anchor_obj), None)
+        item = self._item_for(anchor_obj)
+        if anchor is None or item is None:
+            return
+        dest = self._step_destination(anchor, delta, item)
+        if dest is None or not self._apply_move(objs, [lst] * len(objs), dest):
+            return
         self.refresh()
         self._select_objs(objs)
 
-    def _block_pop_out(self, sel, objs, lst, delta):
-        owner, owner_list = sel[0].get("owner"), sel[0].get("owner_list")
-        if owner is None or owner_list is None:
-            return False
-        for o in objs:
-            lst.remove(o)
-        oi = _index_of(owner_list, owner) + (1 if delta > 0 else 0)
-        owner_list[oi:oi] = objs
-        return True
+    def _item_for(self, obj):
+        for item in self._iter_tree_items():
+            data = self._payload_of(item)
+            if data and data.get("obj") is obj:
+                return item
+        return None
 
     def _move_branch(self, data, delta):
         lst, obj = data["list"], data["obj"]
@@ -288,75 +276,92 @@ class TreeEditMixin:
         owner_list.insert(oi + (1 if delta > 0 else 0), obj)
         self.refresh(select=obj)
 
-    def _pop_out(self, data, delta):
-        """Move a step out of its body into the list around the owning branch
-        (after it going down, before it going up). Returns True if moved."""
+    @staticmethod
+    def _body_of(data):
+        """The item list a branch-arm / else row owns."""
+        return data["list"] if data["kind"] == "else" else data["obj"].true_branch
+
+    def _step_destination(self, data, delta, item):
+        """Where a step at `item` lands when moved by `delta`, following the
+        tree's VISIBLE order: (dest_list, anchor, where) with `where` one of
+        before/after/start/end (anchor is None for start/end). None = can't move.
+
+        Pure — it computes, it doesn't mutate. Both the single-step and the
+        multi-step move go through it, so they can't drift apart: list adjacency
+        alone can't see elseif/else bodies, since those hang off false_branch
+        and are only neighbours on screen.
+        """
+        lst = data["list"]
+        neighbour = (self.tree.itemBelow(item) if delta > 0
+                     else self.tree.itemAbove(item))
         owner, owner_list = data.get("owner"), data.get("owner_list")
-        if owner is None or owner_list is None:
-            return False
-        data["list"].remove(data["obj"])
-        owner_list.insert(_index_of(owner_list, owner) + (1 if delta > 0 else 0), data["obj"])
+        if neighbour is None:
+            # last visible row: DOWN still pops out one level so a step can
+            # leave the branch (e.g. out of the else body). UP has nowhere to go.
+            if delta > 0 and owner is not None and owner_list is not None:
+                return owner_list, owner, "after"
+            return None
+        nd = self._payload_of(neighbour)
+        if nd is None:
+            return None
+
+        if delta > 0:                                   # DOWN
+            if nd["kind"] in ("branch", "else"):
+                return self._body_of(nd), None, "start"     # enter body from top
+            if nd["list"] is lst:
+                return lst, nd["obj"], "after"              # reorder within list
+            return nd["list"], nd["obj"], "before"          # pop out before it
+
+        # UP
+        if nd["kind"] == "step":
+            if nd["list"] is lst:
+                return lst, nd["obj"], "before"             # reorder within list
+            return nd["list"], nd["obj"], "after"           # nest at that body's end
+        if item.parent() is neighbour:
+            # first child of the container above -> the previous visible body
+            # (an else's first child goes to the end of the elseif above it), or
+            # out of the branch when nothing sits above that header.
+            above = self.tree.itemAbove(neighbour)
+            ad = self._payload_of(above) if above is not None else None
+            if ad and ad["kind"] == "step":
+                return ad["list"], ad["obj"], "after"
+            if ad and ad["kind"] in ("branch", "else"):
+                return self._body_of(ad), None, "end"
+            if owner is None or owner_list is None:
+                return None
+            return owner_list, owner, "before"
+        # a container sits above the whole block -> enter its last body at the end
+        return self._body_of(nd), None, "end"
+
+    def _apply_move(self, objs, srcs, dest) -> bool:
+        """Pull `objs` out of their `srcs` lists and splice them into `dest`."""
+        dest_list, anchor, where = dest
+        for obj, src in zip(objs, srcs):
+            i = _index_of(src, obj)
+            if i < 0:
+                return False
+            del src[i]
+        # only now look the anchor up: removing the items shifts its index
+        # whenever the source and destination are the same list
+        if where == "start":
+            at = 0
+        elif where == "end":
+            at = len(dest_list)
+        else:
+            at = _index_of(dest_list, anchor)
+            if at < 0:
+                return False
+            if where == "after":
+                at += 1
+        dest_list[at:at] = objs
         return True
 
     def _move_step(self, data, delta):
-        lst, obj = data["list"], data["obj"]
-        cur = self.tree.currentItem()
-        neighbor_item = (self.tree.itemBelow(cur) if delta > 0
-                         else self.tree.itemAbove(cur))
-        if neighbor_item is None:
-            # last (or first) visible row: DOWN at the very end still pops the
-            # step out one level so it can leave the branch (e.g. the else body)
-            if delta > 0 and self._pop_out(data, delta):
-                self.refresh(select=obj)
+        obj = data["obj"]
+        item = self.tree.currentItem()
+        dest = self._step_destination(data, delta, item)
+        if dest is None or not self._apply_move([obj], [data["list"]], dest):
             return
-        nd = self._payload_of(neighbor_item)
-        if nd is None:
-            return
-        i = _index_of(lst, obj)
-
-        if delta > 0:   # DOWN
-            if nd["kind"] in ("branch", "else"):
-                body = nd["obj"].true_branch if nd["kind"] == "branch" else nd["list"]
-                del lst[i]
-                body.insert(0, obj)                       # enter body from top
-            elif nd["list"] is lst:
-                lst[i], lst[i + 1] = lst[i + 1], lst[i]   # reorder within list
-            else:   # neighbor is in an outer list -> pop out before it
-                del lst[i]
-                nd["list"].insert(_index_of(nd["list"], nd["obj"]), obj)
-        else:           # UP
-            if nd["kind"] == "step" and nd["list"] is lst:
-                lst[i], lst[i - 1] = lst[i - 1], lst[i]   # reorder within list
-            elif nd["kind"] == "step":  # neighbor is deeper -> nest at its body end
-                nlist = nd["list"]
-                del lst[i]
-                nlist.insert(_index_of(nlist, nd["obj"]) + 1, obj)
-            elif cur.parent() is neighbor_item:
-                # obj is the first child of the container above -> move up into
-                # the previous visible body (e.g. else's first child goes to the
-                # end of the elseif above it), or pop out before the branch if
-                # nothing sits above the header (first child of the leading `if`).
-                above = self.tree.itemAbove(neighbor_item)
-                ad = self._payload_of(above) if above is not None else None
-                if ad and ad["kind"] == "step":
-                    del lst[i]
-                    ad["list"].insert(_index_of(ad["list"], ad["obj"]) + 1, obj)
-                elif ad and ad["kind"] in ("branch", "else"):
-                    body = ad["list"] if ad["kind"] == "else" else ad["obj"].true_branch
-                    del lst[i]
-                    body.append(obj)
-                else:
-                    owner, owner_list = data.get("owner"), data.get("owner_list")
-                    if owner is None or owner_list is None:
-                        return
-                    del lst[i]
-                    owner_list.insert(_index_of(owner_list, owner), obj)
-            else:
-                # a container sits above the whole block obj is under -> enter its
-                # last body at the end (fixes: top-level step below a block → else/if)
-                body = nd["list"] if nd["kind"] == "else" else nd["obj"].true_branch
-                del lst[i]
-                body.append(obj)
         self.refresh(select=obj)
 
     # --- drag and drop -----------------------------------------------------

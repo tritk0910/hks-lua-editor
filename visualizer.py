@@ -52,33 +52,83 @@ def condition_text(branch: Branch) -> str:
     return f" {branch.connective} ".join(_cond_item_text(t) for t in branch.terms)
 
 
-def _step_leaf(step: ComboStep) -> str:
-    return f"[{step.anim_id} {step.goal_type}]"
+TEE, ELBOW, PIPE, GAP = "├─ ", "└─ ", "│  ", "   "
 
 
-def _weight_leaf(weight: Weight) -> str:
-    return f"[kengeki {weight.index} = {weight.value}]"
+def _step_leaf(step: ComboStep):
+    if step.goal_type == "ComboAttackTunableSpin":
+        note = "◀ spin"
+    elif step.goal_type == "ComboFinal":
+        note = "◀ final"
+    else:
+        note = None
+    return f"[{step.anim_id}]  {step.goal_type}", note
 
 
-def _act_weight_leaf(weight: Weight) -> str:
-    return f"[act {weight.index} = {weight.value}]"
+def _weight_leaf(weight: Weight):
+    return f"kengeki[{weight.index}] = {weight.value}", None
 
 
-def _render_ladder(items, depth: int, lines: list[str], leaf_fn) -> None:
-    """Render list[<leaf> | Branch] as a ladder. `leaf_fn` formats a leaf."""
-    pad = INDENT * depth
+def _act_weight_leaf(weight: Weight):
+    return f"act[{weight.index}] = {weight.value}", None
+
+
+def _randam_percent(arm: Branch):
+    """The `randam <= N` threshold of an arm tested on nothing else, else None."""
+    if len(arm.terms) != 1:
+        return None
+    term = arm.terms[0]
+    if isinstance(term, BoolNode) or getattr(term, "kind", None) != "randam":
+        return None
+    return None if term.negate else term.threshold
+
+
+def _rows(items, leaf_fn):
+    """One level as display rows: (label, children | None, note)."""
+    out = []
     for item in items:
         if isinstance(item, Branch):
             arms, else_items = unchain_branch(item, items)
+            pct = _randam_percent(arms[0][0])   # unchain yields (arm, its list)
             for k, (arm, _lst) in enumerate(arms):
-                kw = "if" if k == 0 else "elseif"
-                lines.append(f"{pad}{kw} {condition_text(arm)}")
-                _render_ladder(arm.true_branch, depth + 1, lines, leaf_fn)
+                # Only the leading `if` gets a chance label. An elseif's odds
+                # depend on whether it re-rolls or reuses the roll the `if`
+                # already failed — the model doesn't record which, so any number
+                # here would be a guess.
+                note = f"{pct}%" if k == 0 and pct is not None else None
+                out.append((f"{'if' if k == 0 else 'elseif'} {condition_text(arm)}",
+                            arm.true_branch, note))
             if else_items:
-                lines.append(f"{pad}else")
-                _render_ladder(else_items, depth + 1, lines, leaf_fn)
+                note = f"{100 - pct}%" if pct is not None and len(arms) == 1 else None
+                out.append(("else", else_items, note))
         else:
-            lines.append(f"{pad}{leaf_fn(item)}")
+            text, note = leaf_fn(item)
+            out.append((text, None, note))
+    return out
+
+
+def _render_rows(rows, prefix: str, out: list, leaf_fn, top: bool = False) -> None:
+    for i, (label, children, note) in enumerate(rows):
+        last = i == len(rows) - 1
+        if top and children:
+            out.append(("│", None))     # a breather before each top-level block
+        out.append((prefix + (ELBOW if last else TEE) + label, note))
+        if children is not None:
+            _render_rows(_rows(children, leaf_fn), prefix + (GAP if last else PIPE),
+                         out, leaf_fn)
+
+
+def _render_ladder(items, lines: list[str], leaf_fn) -> None:
+    """Render list[<leaf> | Branch] as a ladder under `lines[0]` (the header)."""
+    rows = []
+    _render_rows(_rows(items, leaf_fn), "", rows, leaf_fn, top=True)
+    lines.extend(_align(rows))
+
+
+def _align(rows) -> list[str]:
+    """Put the notes in one column, without trailing space on unnoted rows."""
+    width = max((len(text) for text, note in rows if note), default=0)
+    return [f"{text.ljust(width)}  {note}" if note else text for text, note in rows]
 
 
 def visualize(seq: ComboSequence) -> str:
@@ -90,25 +140,23 @@ def visualize(seq: ComboSequence) -> str:
     else:
         trigger = f"SpecialEffect {seq.trigger_id}"
     lines = [f"{seq.name}  ({trigger})"]
-    _render_ladder(seq.steps, depth=1, lines=lines, leaf_fn=_step_leaf)
+    _render_ladder(seq.steps, lines, _step_leaf)
     return "\n".join(lines)
 
 
 def visualize_kengeki(activator: KengekiActivator) -> str:
     """Ladder diagram of a Kengeki_Activate selector."""
-    lines = ["Kengeki_Activate"]
-    for block in activator.blocks:
-        lines.append(f"{INDENT}effect {block.effect_id}:")
-        _render_ladder(block.items, depth=2, lines=lines, leaf_fn=_weight_leaf)
+    top = [(f"effect {block.effect_id}", block.items, None)
+           for block in activator.blocks]
     if activator.extra_items:
-        lines.append(f"{INDENT}after all effects:")
-        _render_ladder(activator.extra_items, depth=2, lines=lines,
-                       leaf_fn=_weight_leaf)
-    return "\n".join(lines)
+        top.append(("after all effects", activator.extra_items, None))
+    rows = []
+    _render_rows(top, "", rows, _weight_leaf, top=True)
+    return "\n".join(["Kengeki_Activate"] + _align(rows))
 
 
 def visualize_act_activator(activator: ActActivator) -> str:
     """Ladder diagram of Goal.Activate's act-weight region."""
     lines = ["Activate — act weights"]
-    _render_ladder(activator.items, depth=1, lines=lines, leaf_fn=_act_weight_leaf)
+    _render_ladder(activator.items, lines, _act_weight_leaf)
     return "\n".join(lines)

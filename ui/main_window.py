@@ -428,8 +428,9 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
     # --- undo / redo (per-combo) ------------------------------------------
 
     def _push_undo(self):
-        if not self._is_combo():
-            return
+        # Selectors are editable too (their weights), so this must NOT be gated
+        # on _is_combo() the way the add/move actions are — doing so records
+        # nothing for them and silently kills undo.
         uid = getattr(self.seq, "_uid", None)
         if uid is None:
             return
@@ -456,8 +457,7 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self._replace_current(h["redo"].pop())
 
     def _revert_changes(self):
-        if not self._is_combo():
-            return
+        # selectors have a loaded snapshot too — see _push_undo
         uid = getattr(self.seq, "_uid", None)
         orig = self._originals.get(uid) if uid is not None else None
         if orig is None:

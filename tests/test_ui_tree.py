@@ -99,6 +99,74 @@ def test_down_from_else_last_child_pops_out_after_branch(ladder):
 
 # --- multi-select ------------------------------------------------------------
 
+def _home(head, inner, obj) -> str:
+    """Which body of the ladder `obj` currently sits in."""
+    for name, body in (("if", head.true_branch), ("elseif", inner.true_branch),
+                       ("else", inner.false_branch)):
+        if any(x is obj for x in body):
+            return name
+    return "top"
+
+
+def test_block_moves_into_the_else_not_the_if(ladder):
+    """Reported bug: with several steps selected, Alt+Up from below the block
+    jumped into the `if` arm — the block move walked list adjacency, which can't
+    see elseif/else (they hang off false_branch, and are only neighbours on
+    screen)."""
+    window, head, inner = ladder
+    a, b = _step(900), _step(901)
+    window.seq.steps.extend([a, b])
+    window.refresh()
+    window._select_objs([a, b])
+    window._move_selected(-1)
+    assert [s.anim_id for s in inner.false_branch] == [300, 900, 901]
+    assert [s.anim_id for s in head.true_branch] == [100]     # NOT the if arm
+
+
+def test_a_block_walks_the_ladder_exactly_like_a_single_step(window):
+    """Parity is the point: one set of destination rules, so the two paths
+    can't drift apart again."""
+    def build():
+        inner = Branch(terms=[randam(50)], from_elseif=True,
+                       true_branch=[_step(200)], false_branch=[_step(300)])
+        head = Branch(terms=[randam(50)], true_branch=[_step(100)],
+                      false_branch=[inner])
+        seq = ComboSequence(name="t", trigger_type="act_entry", trigger_id=1,
+                            steps=[head, _step(900), _step(901)])
+        window.seq = seq
+        window.combos.append(window._tag(seq))
+        window.refresh()
+        return head, inner, seq.steps[1], seq.steps[2]
+
+    head, inner, lead, second = build()
+    single = []
+    for _ in range(5):
+        window._select_obj(lead)
+        window._move_step(window._selected_payload(), -1)
+        single.append(_home(head, inner, lead))
+
+    head, inner, lead, second = build()
+    block = []
+    for _ in range(5):
+        window._select_objs([lead, second])
+        window._move_selected(-1)
+        block.append(_home(head, inner, lead))
+        assert _home(head, inner, second) == block[-1]   # they travel together
+
+    assert block == single == ["else", "else", "elseif", "elseif", "if"]
+
+
+def test_block_moves_down_from_the_if_body_into_the_elseif_body(ladder):
+    window, head, inner = ladder
+    a, b = _step(101), _step(102)
+    head.true_branch.extend([a, b])
+    window.refresh()
+    window._select_objs([a, b])
+    window._move_selected(1)
+    assert [s.anim_id for s in inner.true_branch] == [101, 102, 200]
+    assert [s.anim_id for s in head.true_branch] == [100]
+
+
 def test_multi_select_sibling_steps_move_as_a_block(window):
     a, b, c = _step(1), _step(2), _step(3)
     seq = ComboSequence(name="t", trigger_type="act_entry", trigger_id=1,
@@ -111,6 +179,69 @@ def test_multi_select_sibling_steps_move_as_a_block(window):
 
 
 # --- add into else -----------------------------------------------------------
+
+# --- removing a selection ---------------------------------------------------
+
+def test_remove_deletes_every_selected_step(window):
+    """Reported bug: Remove only ever dropped the focused row."""
+    a, b, c = _step(1), _step(2), _step(3)
+    window.seq = ComboSequence(name="t", trigger_type="act_entry", trigger_id=1,
+                               steps=[a, b, c])
+    window.combos.append(window._tag(window.seq))
+    window.refresh()
+    window._select_objs([a, b])
+    window._remove_selected()
+    assert [s.anim_id for s in window.seq.steps] == [3]
+
+
+def test_remove_across_different_bodies(ladder):
+    window, head, inner = ladder
+    window._select_objs([head.true_branch[0], inner.false_branch[0]])
+    window._remove_selected()
+    assert head.true_branch == []
+    assert inner.false_branch == []
+    assert [s.anim_id for s in inner.true_branch] == [200]      # untouched
+
+
+def test_removing_a_branch_together_with_a_step_inside_it(ladder):
+    """The step's list belongs to the branch that is going away — the second
+    delete must not fall through to `del lst[-1]`."""
+    window, head, inner = ladder
+    window.seq.steps.append(_step(900))
+    window.refresh()
+    window._select_objs([head, head.true_branch[0]])
+    window._remove_selected()
+    assert head not in window.seq.steps
+    assert [s.anim_id for s in window.seq.steps] == [900]       # survivor intact
+
+
+def test_remove_falls_back_to_the_current_row_when_nothing_is_selected(ladder):
+    window, head, inner = ladder
+    step = head.true_branch[0]
+    window._select_obj(step)
+    window.tree.clearSelection()          # current row stays set
+    window._remove_selected()
+    assert head.true_branch == []
+
+
+def test_remove_deletes_selected_weights(window, ref_lua):
+    from models import ActActivator
+    assert window._load_path(ref_lua)
+    window.seq = next(c for c in window.combos if isinstance(c, ActActivator))
+    window.refresh()
+    rows = [it for it in window._iter_tree_items()
+            if (window._payload_of(it) or {}).get("kind") == "weight"][:2]
+    doomed = [window._payload_of(it)["obj"] for it in rows]
+    window.tree.setCurrentItem(rows[0])
+    for it in rows:
+        it.setSelected(True)
+    import writer
+    before = len(writer._activator_parts(window.seq)[1])
+    window._remove_selected()
+    after = writer._activator_parts(window.seq)[1]
+    assert len(after) == before - 2
+    assert not any(w is d for w in after for d in doomed)
+
 
 def test_add_branch_into_else_nests_a_child(ladder, monkeypatch):
     """Add branch with the `else` node selected nests inside the else body

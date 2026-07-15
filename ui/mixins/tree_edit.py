@@ -14,7 +14,7 @@ import copy
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QMessageBox, QTreeWidgetItem
+from PySide6.QtWidgets import QAbstractItemView, QMessageBox, QTreeWidgetItem
 
 from models import (
     ActActivator, Branch, ComboStep, KengekiActivator, Weight, unchain_branch,
@@ -27,6 +27,20 @@ from ui.step_dialog import StepDialog
 _COMBO_HEADERS = ["Structure", "Anim", "Prio", "Dist", "Extra"]
 # the selectors only have a weight per row — the combo columns are meaningless
 _WEIGHT_HEADERS = ["Structure", "Weight", "", "", ""]
+
+
+def _list_inside(branch, lst) -> bool:
+    """Is `lst` one of the item lists inside `branch`'s own subtree?
+
+    Compared by identity: dropping a branch into its own body would splice the
+    subtree into itself and lose it.
+    """
+    for body in (branch.true_branch, branch.false_branch):
+        if body is lst:
+            return True
+        if any(isinstance(it, Branch) and _list_inside(it, lst) for it in body):
+            return True
+    return False
 
 
 class TreeEditMixin:
@@ -344,6 +358,64 @@ class TreeEditMixin:
                 del lst[i]
                 body.append(obj)
         self.refresh(select=obj)
+
+    # --- drag and drop -----------------------------------------------------
+
+    def _drop_destination(self, target, position):
+        """(list, index) the dragged items should land in, or None if the drop
+        makes no sense. Mirrors _target_list_and_index, but honours whether the
+        cursor sat above/below/on the target row."""
+        data = self._payload_of(target)
+        if target is None or data is None:
+            return self.seq.steps, len(self.seq.steps)      # empty space -> end
+        if position == QAbstractItemView.OnItem:
+            # onto a header: into its body (branch arm -> its `then` side)
+            if data["kind"] == "branch":
+                return data["obj"].true_branch, len(data["obj"].true_branch)
+            if data["kind"] == "else":
+                return data["list"], len(data["list"])
+            # onto a step: treat as "just after it"
+            return data["list"], _index_of(data["list"], data["obj"]) + 1
+        if data["kind"] == "else":
+            # there is no slot beside an else header — use its body
+            return data["list"], 0 if position == QAbstractItemView.AboveItem \
+                else len(data["list"])
+        lst = data["list"]
+        i = _index_of(lst, data["obj"])
+        return lst, i if position == QAbstractItemView.AboveItem else i + 1
+
+    def _handle_drop(self, target, position) -> bool:
+        """Move the dragged selection into the dropped-on slot. Returns True if
+        the model changed (the view is rebuilt from it)."""
+        if not self._is_combo():
+            return False        # selector weights are edited in place, not moved
+        dragged = [d for d in (self._payload_of(it) for it in self.tree.selectedItems())
+                   if d and d["kind"] in ("step", "branch")]
+        if not dragged:
+            return False
+        dest = self._drop_destination(target, position)
+        if dest is None:
+            return False
+        dest_list, dest_index = dest
+        objs = [d["obj"] for d in dragged]
+        # dropping a branch into its own body would detach that whole subtree
+        if any(isinstance(obj, Branch) and _list_inside(obj, dest_list)
+               for obj in objs):
+            return False
+        self._push_undo()
+        # remove first, then insert — removing shifts the destination index when
+        # the items came from the same list ahead of the drop point
+        for d, obj in zip(dragged, objs):
+            src = d["list"]
+            i = _index_of(src, obj)
+            if src is dest_list and i < dest_index:
+                dest_index -= 1
+            del src[i]
+        for k, obj in enumerate(objs):
+            dest_list.insert(dest_index + k, obj)
+        self.refresh()
+        self._select_objs(objs)
+        return True
 
     def _select_objs(self, objs):
         matches = []

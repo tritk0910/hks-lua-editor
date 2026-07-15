@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTabWidget,
-    QTreeWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +40,7 @@ from models import (
     ActActivator, Branch, ComboSequence, ComboStep, KengekiActivator,
 )
 from ui.combo_dialog import ComboDialog
+from ui.combo_tree import ComboTree
 from ui.helpers import TRIGGER_TYPES, _combo_label, _index_of
 from ui.lua_highlighter import LuaHighlighter
 from ui.mixins.dsas_ops import DsasOpsMixin
@@ -126,7 +126,8 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         form.addRow("Trigger id (Act# / effect id)", self.trigger_id)
 
         # tree of steps + branches (multi-column, steps inline-editable)
-        self.tree = QTreeWidget()
+        self.tree = ComboTree()
+        self.tree.drop_handler = self._handle_drop
         self.tree.setHeaderLabels(["Structure", "Anim", "Prio", "Dist", "Extra"])
         self.tree.setColumnCount(5)
         self.tree.header().setStretchLastSection(False)
@@ -165,8 +166,10 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
             btn_row.addWidget(b)
 
         hint = QLabel("Edit Anim/Prio/Dist inline (type or double-click; Enter → next). "
-                      "↑/↓ or Alt+↑/↓ reorders and nests across branches (multi-select ok). "
-                      "Select a branch → Add branch nests a child; Add elseif adds a same-level arm.")
+                      "Drag rows, or use ↑/↓ / Alt+↑/↓, to reorder and nest across "
+                      "branches (multi-select ok) — drop onto an if/elseif/else row to "
+                      "move into its body. Select a branch → Add branch nests a child; "
+                      "Add elseif adds a same-level arm.")
         hint.setStyleSheet("color: gray;")
         hint.setWordWrap(True)
 

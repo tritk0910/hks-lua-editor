@@ -342,14 +342,20 @@ def _flatten_weights(items) -> list:
     return out
 
 
+def _activator_lists(activator) -> list:
+    """The top-level item lists an activator owns, in document order."""
+    if isinstance(activator, ActActivator):
+        return [activator.items]
+    return [b.items for b in activator.blocks] + [activator.extra_items]
+
+
 def _activator_parts(activator):
     """(table_name, weight_items) for either activator type."""
-    if isinstance(activator, ActActivator):
-        return "act", _flatten_weights(activator.items)
-    items = []
-    for block in activator.blocks:
-        items.extend(_flatten_weights(block.items))
-    return "kengeki", items
+    table = "act" if isinstance(activator, ActActivator) else "kengeki"
+    weights = []
+    for items in _activator_lists(activator):
+        weights.extend(_flatten_weights(items))
+    return table, weights
 
 
 def _scan_weight_lines(text: str, table: str) -> dict:
@@ -457,11 +463,8 @@ def _plan_inserts(activator, table: str) -> list:
                 walk(it.true_branch)
                 walk(it.false_branch)
 
-    if isinstance(activator, ActActivator):
-        walk(activator.items)
-    else:
-        for block in activator.blocks:
-            walk(block.items)
+    for items in _activator_lists(activator):
+        walk(items)
     return out
 
 

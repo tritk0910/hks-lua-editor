@@ -175,9 +175,12 @@ class KengekiEffectBlock:
 
 @dataclass
 class KengekiActivator:
-    """The whole Goal.Kengeki_Activate selector: an ordered if/elseif chain."""
+    """The whole Goal.Kengeki_Activate selector: an ordered if/elseif chain,
+    followed by the standalone `if ... then kengeki[x] = 0 end` veto blocks that
+    zero out moves regardless of which effect matched."""
 
     blocks: list = field(default_factory=list)  # list[KengekiEffectBlock]
+    extra_items: list = field(default_factory=list)   # list[Weight | Branch]
     owned_lines: set = field(default_factory=set)
 
 

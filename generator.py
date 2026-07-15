@@ -242,17 +242,19 @@ def generate_act_activate(activator) -> str:
 
 
 def generate_kengeki_activate(activator: KengekiActivator) -> str:
-    """The core `if/elseif local0 == <effect_id> then ... end` selector chain
-    of Goal.Kengeki_Activate. Emits just the chain (the surrounding preamble
-    and REGIST_FUNC tail are boilerplate the user keeps)."""
+    """The `if/elseif local0 == <effect_id> then ... end` selector chain of
+    Goal.Kengeki_Activate, followed by the veto blocks that run whichever effect
+    matched. Emits just those (the surrounding preamble and REGIST_FUNC tail are
+    boilerplate the user keeps)."""
     parts = []
     for idx, block in enumerate(activator.blocks):
         kw = "if" if idx == 0 else "elseif"
         body = _render_kengeki_items(block.items, INDENT)
         parts.append(f"{kw} local0 == {block.effect_id} then\n{body}")
-    if not parts:
-        return ""
-    return "\n".join(parts) + "\nend"
+    chain = "\n".join(parts) + "\nend" if parts else ""
+    # the vetoes sit at the same level as the chain, after its `end`
+    vetoes = _render_kengeki_items(activator.extra_items, "")
+    return "\n".join(p for p in (chain, vetoes) if p)
 
 
 # --- special-effect registration ------------------------------------------

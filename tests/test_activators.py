@@ -7,6 +7,7 @@ can't represent, so anything that regenerated them would quietly delete those.
 
 import copy
 import os
+import re
 
 import pytest
 
@@ -21,7 +22,6 @@ FRAGILE = [
     "        -- elseif getDist >= 7 and arg1:GetNumber(7) == 1 and arg1:GetNumber(10) == 0 then",
     "        --     act[49] = 50",
     "        arg1:SetNumber(2, 0)",                       # not a weight, not a branch
-    "        kengeki[3] = 0",                             # veto block the parser skips
     "    act[1] = SetCoolTime(arg1, arg2, 3000, 15, act[1], 1)",
     "    local1[49] = REGIST_FUNC(arg1, arg2, arg0.Act49)",
 ]
@@ -51,9 +51,7 @@ def kengeki(parsed):
 
 
 def _weight_at(activator, line):
-    items = (activator.items if isinstance(activator, ActActivator)
-             else [i for b in activator.blocks for i in b.items])
-    return next(w for w in writer._flatten_weights(items) if w.line == line)
+    return next(w for w in writer._activator_parts(activator)[1] if w.line == line)
 
 
 # --- parsing ----------------------------------------------------------------
@@ -71,12 +69,36 @@ def test_both_selectors_are_parsed(parsed):
     assert kinds == {"ActActivator", "KengekiActivator"}
 
 
-def test_owned_lines_exclude_what_the_parser_skips(kengeki, text):
-    """Kengeki_Activate's trailing `if ... then kengeki[x] = 0 end` vetoes are
-    not parsed, so they must not be claimed — otherwise a write deletes them."""
+def test_owned_lines_exclude_cooldown_lines(kengeki, act, text):
+    """`kengeki[1] = SetCoolTime(...)` has the shape of a weight but is a
+    cooldown. Claiming it would let a write mangle the cooldown block."""
+    lines = text.split("\n")
+    for activator, table in ((kengeki, "kengeki"), (act, "act")):
+        cooldown = next(n for n, line in enumerate(lines, 1)
+                        if line.strip().startswith(f"{table}[1] = SetCoolTime("))
+        assert cooldown not in activator.owned_lines
+
+
+def test_kengeki_veto_blocks_are_parsed_and_owned(kengeki, text):
+    """The `if ... then kengeki[x] = 0 end` blocks after the local0 chain are
+    weights too, so they are editable rather than merely left alone."""
+    assert len(kengeki.extra_items) == 3
     veto_line = next(n for n, line in enumerate(text.split("\n"), 1)
                      if line.strip() == "kengeki[3] = 0")
-    assert veto_line not in kengeki.owned_lines
+    assert veto_line in kengeki.owned_lines
+    assert any(w.line == veto_line
+               for w in writer._flatten_weights(kengeki.extra_items))
+
+
+def test_editing_a_kengeki_veto_weight_touches_only_that_line(kengeki, text):
+    veto_line = next(n for n, line in enumerate(text.split("\n"), 1)
+                     if line.strip() == "kengeki[3] = 0")
+    _weight_at(kengeki, veto_line).value = 7
+    out, summary = writer.apply_activator(text, kengeki)
+    before, after = text.split("\n"), out.split("\n")
+    assert [i + 1 for i in range(len(before)) if before[i] != after[i]] == [veto_line]
+    assert after[veto_line - 1].strip() == "kengeki[3] = 7"
+    assert summary == [f"kengeki[3] = 7 (was 0, line {veto_line})"]
 
 
 # --- writing: the core guarantee -------------------------------------------
@@ -154,6 +176,38 @@ def test_added_weight_is_inserted_beside_its_block(text, act):
     added = next(i for i, line in enumerate(lines) if line.strip() == "act[99] = 42")
     assert lines[added].startswith("            ")     # indent of its block
     assert lines[added - 1].strip() == "act[28] = 100"  # right after its sibling
+
+
+# --- previews render the whole model ---------------------------------------
+
+@pytest.mark.parametrize("render", ["lua", "diagram"])
+def test_kengeki_preview_renders_every_weight_including_vetoes(kengeki, render):
+    """Counting rather than spot-checking: the previews once iterated only
+    `blocks`, so the 14 weights in `extra_items` were silently missing."""
+    import generator
+    import visualizer
+
+    out = (generator.generate_kengeki_activate(kengeki) if render == "lua"
+           else visualizer.visualize_kengeki(kengeki))
+    rendered = len(re.findall(r"kengeki[\[ ]\d+[\]]? =", out))
+    assert rendered == len(writer._activator_parts(kengeki)[1]) == 142
+    assert "kengeki[3] = 0" in out or "kengeki 3 = 0" in out
+
+
+def test_kengeki_lua_keeps_the_veto_conditions(kengeki):
+    import generator
+    lua = generator.generate_kengeki_activate(kengeki)
+    assert "200051" in lua                     # the veto's condition
+    chain_end = lua.index("\nend\n")           # vetoes come after the chain
+    assert lua.index("200051") > chain_end
+
+
+def test_kengeki_lua_renders_vetoes_even_without_any_blocks(kengeki):
+    """The early `return ""` for an empty chain used to swallow them."""
+    import generator
+    from models import KengekiActivator
+    only_vetoes = KengekiActivator(blocks=[], extra_items=kengeki.extra_items)
+    assert "kengeki[3] = 0" in generator.generate_kengeki_activate(only_vetoes)
 
 
 def test_write_is_refused_when_the_model_no_longer_matches_the_file(text, act):

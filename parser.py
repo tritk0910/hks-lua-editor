@@ -475,6 +475,7 @@ def _parse_kengeki_activate(body: str, warnings: list,
     locals_ = _build_local_table(lines)
     activator = KengekiActivator()
     i = 0
+    chain_end = 0
     while i < len(lines):
         indent, text = lines[i][0], lines[i][1]
         m = re.match(r"^(?:if|elseif) local0 == (\d+) then$", text)
@@ -486,9 +487,19 @@ def _parse_kengeki_activate(body: str, warnings: list,
                                 leaf=_kengeki_leaf)
         if eid != 0:   # `== 0` is the "no kengeki effect" guard, not a block
             activator.blocks.append(KengekiEffectBlock(effect_id=eid, items=items))
-        i = j
+        i = chain_end = j
+
+    # the veto blocks after the chain: same shape as Goal.Activate's, so read
+    # them the same way — but only from past the chain, or the region scan would
+    # just find the chain itself.
+    start, end = weight_region(lines[chain_end:], "kengeki")
+    if start != end:
+        activator.extra_items, _ = _parse_block(
+            lines[chain_end + start:chain_end + end], 0, 4, locals_, warnings,
+            leaf=_kengeki_leaf)
+
     activator.owned_lines = _weight_lines(
-        [it for b in activator.blocks for it in b.items])
+        [it for b in activator.blocks for it in b.items] + activator.extra_items)
     return activator
 
 
@@ -517,10 +528,12 @@ def _has_weight(lines, i, base_indent, table: str) -> bool:
     return False
 
 
-def activate_region(lines, table: str = "act") -> tuple[int, int]:
-    """(start, end) indices of the weight region inside Goal.Activate's logical
-    lines: from the first top-level statement that assigns a weight, up to the
-    cooldown block that follows it.
+def weight_region(lines, table: str = "act") -> tuple[int, int]:
+    """(start, end) indices of a weight region: from the first top-level
+    statement that assigns a weight, up to the cooldown block that follows it.
+
+    Used for Goal.Activate's ladder and, from past the `local0` chain, for
+    Kengeki_Activate's trailing veto blocks.
 
     The end MUST be pinned to the SetCoolTime block: _parse_block does not stop
     on its own and would otherwise run on into the REGIST_FUNC tail.
@@ -546,7 +559,7 @@ def _parse_activate(body: str, warnings: list,
     """
     lines = _logical_lines(body, line_offset)
     locals_ = _build_local_table(lines)
-    start, end = activate_region(lines, "act")
+    start, end = weight_region(lines, "act")
     if start == end:
         return ActActivator()
     items, _ = _parse_block(lines[start:end], 0, 4, locals_, warnings,

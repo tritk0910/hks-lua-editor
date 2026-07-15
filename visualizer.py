@@ -100,6 +100,10 @@ def visualize_kengeki(activator: KengekiActivator) -> str:
     for block in activator.blocks:
         lines.append(f"{INDENT}effect {block.effect_id}:")
         _render_ladder(block.items, depth=2, lines=lines, leaf_fn=_weight_leaf)
+    if activator.extra_items:
+        lines.append(f"{INDENT}after all effects:")
+        _render_ladder(activator.extra_items, depth=2, lines=lines,
+                       leaf_fn=_weight_leaf)
     return "\n".join(lines)
 
 

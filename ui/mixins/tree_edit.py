@@ -431,6 +431,11 @@ class TreeEditMixin:
                     node = QTreeWidgetItem(root, [f"effect {block.effect_id}"])
                     node.setForeground(0, QColor("#2980b9"))
                     self._add_tree_items(block.items, node)
+                if self.seq.extra_items:
+                    # the vetoes that apply whichever effect matched
+                    node = QTreeWidgetItem(root, ["after all effects"])
+                    node.setForeground(0, QColor("#2980b9"))
+                    self._add_tree_items(self.seq.extra_items, node)
             else:
                 return
             self.tree.expandAll()

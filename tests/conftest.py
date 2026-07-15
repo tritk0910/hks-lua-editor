@@ -15,6 +15,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import ui.main_window as main_window
+import ui.mixins.recent_files as recent_files
 
 REF = os.path.join(os.path.dirname(os.path.dirname(__file__)), "710300_battle.lua")
 
@@ -29,11 +30,12 @@ def qapp():
 def window(qapp, tmp_path, monkeypatch):
     """A fresh MainWindow whose QSettings are redirected to a temp .ini.
 
-    The patch must happen BEFORE constructing: __init__ -> _build_menu ->
-    _rebuild_recent_menu -> _load_recents would otherwise read the real registry.
+    Patched on ui.mixins.recent_files (where _settings actually looks QSettings
+    up), and BEFORE constructing: __init__ -> _build_menu -> _rebuild_recent_menu
+    -> _load_recents would otherwise read the real registry.
     """
     ini = str(tmp_path / "settings.ini")
-    monkeypatch.setattr(main_window, "QSettings",
+    monkeypatch.setattr(recent_files, "QSettings",
                         lambda *a, **k: QSettings(ini, QSettings.IniFormat))
     return main_window.MainWindow()
 

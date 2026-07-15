@@ -116,7 +116,7 @@ def test_add_branch_into_else_nests_a_child(ladder, monkeypatch):
     """Add branch with the `else` node selected nests inside the else body
     (a same-level arm is what 'Add elseif' is for)."""
     window, head, inner = ladder
-    import ui.main_window as mw
+    import ui.mixins.tree_edit as tree_edit      # patch where it's used
     new = Branch(terms=[randam(25)])
 
     class Dlg:
@@ -127,7 +127,7 @@ def test_add_branch_into_else_nests_a_child(ladder, monkeypatch):
         def result_branch(self):
             return new
 
-    monkeypatch.setattr(mw, "BranchDialog", Dlg)
+    monkeypatch.setattr(tree_edit, "BranchDialog", Dlg)
     # select the else node, then add a branch
     else_item = next(it for it in window._iter_tree_items()
                      if (window._payload_of(it) or {}).get("kind") == "else")

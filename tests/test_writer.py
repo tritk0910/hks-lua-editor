@@ -1,21 +1,15 @@
-"""Tests for writer.py — targeted splice into a .lua file (via tmp copies)."""
+"""Tests for writer.py — targeted splice into a .lua file (via tmp copies).
+
+The `text` / `ref_lua` fixtures live in conftest.py and skip when the reference
+file is absent.
+"""
 
 import os
-import shutil
-
-import pytest
+import pathlib
 
 import writer
 from models import Branch, ComboSequence, ComboStep, randam
 from parser import parse_file, iter_function_spans
-
-REF = os.path.join(os.path.dirname(os.path.dirname(__file__)), "710300_battle.lua")
-
-
-@pytest.fixture(scope="module")
-def text():
-    with open(REF, encoding="utf-8", errors="ignore") as f:
-        return f.read()
 
 
 def _seq(parsed, ttype, tid):
@@ -146,9 +140,8 @@ def test_interrupt_replace_existing_branch(text):
     assert new.count("elseif interruptEffectIdentifier == 5031 then") == before
 
 
-def test_write_file_makes_backup(text, tmp_path):
-    target = tmp_path / "combat.lua"
-    shutil.copy2(REF, target)
+def test_write_file_makes_backup(ref_lua):
+    target = pathlib.Path(ref_lua)
     original = target.read_text(encoding="utf-8", errors="ignore")
     backup = writer.write_file(str(target), "NEW CONTENT", backup=True)
     assert backup == str(target) + ".bak"

@@ -25,6 +25,10 @@ It handles three combo families found in a real behavior file:
 ### Reference file
 - `710300_battle.lua` is a real enemy AI (HKS) file used as the ground-truth
   reference for the parsing/generation logic. You can also load your own `.lua`.
+- It is a copyrighted FromSoftware file, so it is **not** committed to this repo
+  (it's in `.gitignore`). Unpack it from the game yourself and drop it in the
+  project root. Without it the app works fine — only the tests that parse a real
+  behavior file are skipped (see below).
 
 ### Helpful background
 - A behavior file registers a combo in three places: the `Goal.ActNN` /
@@ -126,6 +130,9 @@ antivirus tools flag PyInstaller one-file exes as a false positive. `build/` and
   `writer.py`, `dsas.py`) is fully UI-agnostic — the PySide6 UI in `ui/` can be
   swapped without touching it.
 - Run the tests: `python -m pytest tests/ -q`
+- Tests that need `710300_battle.lua` skip with an explanation when it isn't
+  there, so a fresh clone runs green (a good chunk of the suite is skipped).
+  Add your own copy to the project root to run them all.
 
 ## Things to add in future updates
 - Building the `Kengeki_Activate` weight selector from the UI (not just viewing).

@@ -6,16 +6,12 @@ can't represent, so anything that regenerated them would quietly delete those.
 """
 
 import copy
-import os
 import re
 
 import pytest
 
 import writer
 from models import ActActivator, KengekiActivator, Weight
-from parser import parse_file
-
-REF = os.path.join(os.path.dirname(os.path.dirname(__file__)), "710300_battle.lua")
 
 # things inside the regions that only survive because we splice single lines
 FRAGILE = [
@@ -25,17 +21,6 @@ FRAGILE = [
     "    act[1] = SetCoolTime(arg1, arg2, 3000, 15, act[1], 1)",
     "    local1[49] = REGIST_FUNC(arg1, arg2, arg0.Act49)",
 ]
-
-
-@pytest.fixture(scope="module")
-def text():
-    with open(REF, encoding="utf-8", errors="ignore") as f:
-        return f.read()
-
-
-@pytest.fixture(scope="module")
-def parsed(text):
-    return parse_file(text)
 
 
 @pytest.fixture

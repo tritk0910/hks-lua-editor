@@ -1,20 +1,10 @@
-"""Tests for parser.py, run against the real 710300_battle.lua reference."""
+"""Tests for parser.py, run against the real 710300_battle.lua reference.
 
-import os
-
-import pytest
+The `parsed` fixture lives in conftest.py and skips when that file is absent.
+"""
 
 from models import Branch, ComboStep
 from generator import generate_act
-from parser import parse_file
-
-REF = os.path.join(os.path.dirname(os.path.dirname(__file__)), "710300_battle.lua")
-
-
-@pytest.fixture(scope="module")
-def parsed():
-    with open(REF, encoding="utf-8", errors="ignore") as f:
-        return parse_file(f.read())
 
 
 def _act(parsed, num):

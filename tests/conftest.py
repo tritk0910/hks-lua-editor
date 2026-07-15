@@ -1,10 +1,14 @@
-"""Shared fixtures for the UI tests (headless, isolated from the real machine).
+"""Shared fixtures: the reference behavior file, and a headless MainWindow.
 
-Two things must be isolated or the tests would touch real state:
+Isolation matters here, or the tests would touch real state:
   * QSettings — MainWindow reads the recent-files list while building its menu,
     which would hit the real registry. `window` points it at a temp .ini first.
   * the reference .lua — tests that write/remove use a temp copy, never the
     repo's own 710300_battle.lua.
+
+The reference file is a copyrighted game file and is deliberately NOT committed
+(see .gitignore), so tests that need it skip with an explanation when it is
+absent rather than erroring out on a fresh clone.
 """
 
 import os
@@ -16,8 +20,35 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 import ui.main_window as main_window
 import ui.mixins.recent_files as recent_files
+from parser import parse_file
 
 REF = os.path.join(os.path.dirname(os.path.dirname(__file__)), "710300_battle.lua")
+
+_NO_REF = (
+    "710300_battle.lua is not present. It is a copyrighted FromSoftware file, so "
+    "it is not committed to this repo — drop your own copy in the project root to "
+    "run the tests that parse a real behavior file."
+)
+
+
+def _require_ref():
+    if not os.path.exists(REF):
+        pytest.skip(_NO_REF)
+
+
+@pytest.fixture(scope="session")
+def text():
+    """Contents of the reference behavior file (read-only; shared)."""
+    _require_ref()
+    with open(REF, encoding="utf-8", errors="ignore") as f:
+        return f.read()
+
+
+@pytest.fixture(scope="module")
+def parsed(text):
+    """The parsed reference file — module-scoped so one module's edits to the
+    tree can't leak into another's."""
+    return parse_file(text)
 
 
 @pytest.fixture(scope="session")
@@ -43,6 +74,7 @@ def window(qapp, tmp_path, monkeypatch):
 @pytest.fixture
 def ref_lua(tmp_path):
     """Path to a throwaway copy of the reference behavior file."""
+    _require_ref()
     dst = tmp_path / "combat.lua"
     shutil.copy2(REF, dst)
     return str(dst)

@@ -23,6 +23,7 @@ class Document:
     combos: list = field(default_factory=list)    # this file's combos/activators
     warnings: list = field(default_factory=list)  # parser.ParseWarning
     current: object = None             # the combo selected in this tab
+    missing: bool = False              # path vanished on disk (kept in memory)
 
     @property
     def title(self) -> str:

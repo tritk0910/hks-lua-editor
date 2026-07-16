@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QFileSystemWatcher, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -45,7 +45,10 @@ from models import (
 from ui.combo_dialog import ComboDialog
 from ui.combo_tree import ComboTree
 from ui.document import Document
-from ui.helpers import TRIGGER_TYPES, _combo_label, _index_of, _seed_clear_subgoal
+from parser import parse_file
+from ui.helpers import (
+    TRIGGER_TYPES, _combo_key, _combo_label, _index_of, _seed_clear_subgoal,
+)
 from ui.lua_highlighter import LuaHighlighter
 from ui.mixins.dsas_ops import DsasOpsMixin
 from ui.mixins.file_ops import FileOpsMixin
@@ -70,6 +73,13 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self.doc = self.docs[0]
         self._originals = {}       # uid -> deepcopy snapshot at load (Revert)
         self._history = {}         # uid -> {"undo": [...], "redo": [...]}
+        # hot reload: off until the user turns it on (File menu). Watches each
+        # open file AND its directory, so deletes / atomic saves are noticed too.
+        self._watch_enabled = False
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_file_changed)
+        self._watcher.directoryChanged.connect(self._on_dir_changed)
+        self._reload_timers = {}   # path -> QTimer (debounce burst events)
         self._syncing = False
         self._building = False     # True while rebuilding the tree (ignore edits)
         self._clipboard = None     # deepcopy of a copied step/branch
@@ -136,11 +146,127 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
             while self.file_tabs.count():
                 self.file_tabs.removeTab(0)
             for doc in self.docs:
-                i = self.file_tabs.addTab(doc.title)
-                self.file_tabs.setTabToolTip(i, doc.path or "not saved to a file yet")
+                title = f"⚠ {doc.title}" if doc.missing else doc.title
+                i = self.file_tabs.addTab(title)
+                self.file_tabs.setTabToolTip(
+                    i, (doc.path or "not saved to a file yet")
+                    + (" — deleted on disk, still in memory" if doc.missing else ""))
             self.file_tabs.setCurrentIndex(_index_of(self.docs, self.doc))
         finally:
             self._syncing = False
+        self._sync_watched_paths()
+
+    # --- hot reload --------------------------------------------------------
+
+    def _set_watching(self, on: bool):
+        self._watch_enabled = on
+        self._sync_watched_paths()
+        self.status.setStyleSheet("color: gray;")
+        self.status.setText("Watching open files for changes."
+                            if on else "Stopped watching files.")
+
+    def _sync_watched_paths(self):
+        """Watch each open file and its directory when enabled, nothing when not.
+        Directories matter: a delete or an atomic save (write-temp-rename) drops
+        the file watch, and only the directory event tells us it came back."""
+        if self._watcher.files():
+            self._watcher.removePaths(self._watcher.files())
+        if self._watcher.directories():
+            self._watcher.removePaths(self._watcher.directories())
+        if not self._watch_enabled:
+            return
+        for doc in self.docs:
+            if not doc.path:
+                continue
+            if os.path.exists(doc.path):
+                self._watcher.addPath(doc.path)
+            d = os.path.dirname(doc.path)
+            if d and os.path.isdir(d):
+                self._watcher.addPath(d)
+
+    def _on_file_changed(self, path: str):
+        # coalesce the 1–2 events an editor fires per save
+        timer = self._reload_timers.get(path)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda p=path: self._file_changed_settled(p))
+            self._reload_timers[path] = timer
+        timer.start(200)
+
+    def _on_dir_changed(self, directory: str):
+        for doc in list(self.docs):
+            if not doc.path or os.path.dirname(doc.path) != directory:
+                continue
+            exists = os.path.exists(doc.path)
+            if not exists and not doc.missing:
+                doc.missing = True
+                self._refresh_file_tabs()
+                self._note_status(f"{os.path.basename(doc.path)} deleted on disk "
+                                  "— kept in memory.", warn=True)
+            elif exists and doc.missing:
+                doc.missing = False
+                self._refresh_file_tabs()
+                self._file_changed_settled(doc.path)   # reappeared -> sync it
+
+    def _file_changed_settled(self, path: str):
+        if not self._watch_enabled:
+            return
+        if os.path.exists(path) and path not in self._watcher.files():
+            self._watcher.addPath(path)                # re-arm after atomic save
+        doc = self._document_for(path)
+        if doc is None or not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                disk = f.read()
+        except OSError:
+            return                                     # mid-save; a later event retries
+        if disk == doc.text:
+            return                                     # our own write, or a no-op touch
+        parsed = parse_file(disk)
+        if not (parsed.sequences or parsed.activators):
+            return                                     # transient/garbage — keep the tab
+        if self._document_dirty(doc):
+            keep = QMessageBox.question(
+                self, "File changed on disk",
+                f"{os.path.basename(path)} changed on disk, but you have unsaved "
+                "edits here.\n\nReload from disk (discard your edits) or keep editing?",
+                QMessageBox.Reset | QMessageBox.Cancel)   # Reset=Reload, Cancel=Keep
+            if keep != QMessageBox.Reset:
+                return
+        self._reload_document(doc)
+
+    def _document_dirty(self, doc) -> bool:
+        """True if any combo in `doc` differs from its load-time snapshot (or has
+        none — built here). This is the same signal Revert uses."""
+        for combo in doc.combos:
+            orig = self._originals.get(getattr(combo, "_uid", None))
+            if orig is None or combo != orig:
+                return True
+        return False
+
+    def _reload_document(self, doc):
+        """Replace `doc`'s contents with a fresh parse of its file, keeping the
+        selected combo (by trigger) and dropping the old combos' undo state."""
+        fresh = self._read_document(doc.path)
+        if fresh is None:
+            return
+        want = _combo_key(doc.current)
+        for combo in doc.combos:                       # retire the old uids
+            uid = getattr(combo, "_uid", None)
+            self._originals.pop(uid, None)
+            self._history.pop(uid, None)
+        doc.text, doc.warnings, doc.combos = fresh.text, fresh.warnings, fresh.combos
+        doc.current = next((c for c in doc.combos if _combo_key(c) == want),
+                           doc.combos[0])
+        if doc is self.doc:
+            self._show_document(doc)
+        self._note_status(f"Reloaded {os.path.basename(doc.path)} from disk.")
+
+    def _note_status(self, text: str, warn: bool = False):
+        self.status.setStyleSheet("color: #c0392b;" if warn else "color: #27ae60;")
+        self.status.setText(text)
 
     def _on_file_tab_changed(self, index: int):
         if self._syncing or not (0 <= index < len(self.docs)):
@@ -366,6 +492,9 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         file_menu.addAction(act("Remove from file…", self._remove_from_file))
         file_menu.addAction(act("Remove special effect…", self._remove_speffect_from_file))
         file_menu.addAction(act("Open in editor", self._open_in_editor))
+        watch_action = QAction("Watch files for changes", self, checkable=True)
+        watch_action.toggled.connect(self._set_watching)
+        file_menu.addAction(watch_action)
         file_menu.addAction(act("Import from DSAS…", self._import_dsas))
         file_menu.addAction(act("Export to DSAS…", self._export_dsas))
         file_menu.addSeparator()

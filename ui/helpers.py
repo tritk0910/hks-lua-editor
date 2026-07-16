@@ -50,6 +50,17 @@ def _index_of(lst, obj) -> int:
     return -1
 
 
+def _combo_key(item):
+    """Identity of a combo across a reload: its trigger, or its activator type.
+    Lets a reload re-select the same combo the user had open."""
+    from models import ActActivator, KengekiActivator
+    if isinstance(item, (ActActivator, KengekiActivator)):
+        return type(item).__name__
+    if item is None:
+        return None
+    return (item.trigger_type, item.trigger_id)
+
+
 def _combo_label(item) -> str:
     if isinstance(item, KengekiActivator):
         return f"Kengeki_Activate ({len(item.blocks)} blocks)"

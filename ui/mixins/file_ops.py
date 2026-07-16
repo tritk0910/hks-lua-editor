@@ -77,31 +77,41 @@ class FileOpsMixin:
             self._refresh_file_tabs()
             self._show_document(already)
             return True
+        doc = self._read_document(path, warn=True)
+        if doc is None:
+            return False
+        # its own tab: combos must never mix with another file's, or writing one
+        # would splice it into the other file
+        self._open_document(doc)
+        self._add_recent(path)
+        self.status.setStyleSheet("color: #27ae60;")
+        self.status.setText(f"Loaded {len(doc.combos)} items "
+                            f"({len(doc.warnings)} parse warnings).")
+        return True
+
+    def _read_document(self, path: str, warn: bool = False):
+        """Read+parse `path` into a fresh Document (uid-tagged, snapshotted for
+        Revert). None on read/parse failure — `warn` pops a dialog when so.
+        Shared by open and hot-reload."""
         try:
             with open(path, encoding="utf-8", errors="ignore") as f:
                 text = f.read()
         except OSError as exc:
-            QMessageBox.warning(self, "Cannot open", f"Could not read the file:\n{exc}")
-            return False
+            if warn:
+                QMessageBox.warning(self, "Cannot open", f"Could not read the file:\n{exc}")
+            return None
         result = parse_file(text)
         items = list(result.sequences) + list(result.activators)
         if not items:
-            QMessageBox.warning(self, "Nothing parsed",
-                                "No combos or kengeki selector were found.")
-            return False
+            if warn:
+                QMessageBox.warning(self, "Nothing parsed",
+                                    "No combos or kengeki selector were found.")
+            return None
         for it in items:                          # uid + original snapshot for revert
             self._tag(it)
             self._originals[it._uid] = copy.deepcopy(it)
-        # its own tab: combos must never mix with another file's, or writing one
-        # would splice it into the other file
-        self._open_document(Document(path=path, text=text,
-                                     warnings=list(result.warnings),
-                                     combos=items, current=items[0]))
-        self._add_recent(path)
-        self.status.setStyleSheet("color: #27ae60;")
-        self.status.setText(f"Loaded {len(items)} items "
-                            f"({len(result.warnings)} parse warnings).")
-        return True
+        return Document(path=path, text=text, warnings=list(result.warnings),
+                        combos=items, current=items[0])
 
     def _open_in_editor(self):
         """Open the loaded .lua with the Windows default app (e.g. VSCode)."""

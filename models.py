@@ -128,6 +128,10 @@ class ComboSequence:
     steps: list = field(default_factory=list)  # list[ComboStep | Branch], in order
     approach: list | None = None  # 7 Approach_Act_Flex params (local0..local6),
                                   # int or resolved expression string; None if absent
+    #: parser.ParseWarning list — what couldn't be modelled when this combo was
+    #: read. Writing it regenerates the function from the model, so these are
+    #: exactly what would be lost; empty for combos built in the editor.
+    warnings: list = field(default_factory=list)
 
 
 # --- Move selectors: Goal.Activate and Goal.Kengeki_Activate ----------------

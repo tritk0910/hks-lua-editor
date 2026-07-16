@@ -71,12 +71,12 @@ def test_interrupt_3710071_chained_timing_warns(parsed):
     # the branch parses at least one step
     assert seq.steps
     # a warning about the dropped :TimingSetNumber chain was recorded
-    assert any("chained call after AddSubGoal" in w for w in parsed.warnings)
+    assert any("chained call after AddSubGoal" in w.message for w in parsed.warnings)
 
 
 def test_act23_param_if_skipped_with_warning(parsed):
     _act(parsed, 23)  # must exist and not crash
-    assert any("skipped non-combo if" in w for w in parsed.warnings)
+    assert any("skipped non-combo if" in w.message for w in parsed.warnings)
 
 
 def test_ninsatsu_condition_parsed(parsed):
@@ -184,7 +184,7 @@ def test_kengeki37_elseif_vs_nested_if(parsed):
 def test_kengeki02_chained_timing(parsed):
     seq = _kengeki(parsed, 2)
     assert seq.steps  # parsed at least one AddSubGoal
-    assert any("chained call after AddSubGoal" in w for w in parsed.warnings)
+    assert any("chained call after AddSubGoal" in w.message for w in parsed.warnings)
 
 
 # --- Slice 3b: Kengeki_Activate selector ----------------------------------

@@ -83,6 +83,7 @@ class FileOpsMixin:
                                 "No combos or kengeki selector were found.")
             return False
         self._loaded_text = text
+        self._warnings = list(result.warnings)
         self.loaded_path = path
         for it in items:                          # uid + original snapshot for revert
             self._tag(it)
@@ -153,11 +154,20 @@ class FileOpsMixin:
             QMessageBox.information(self, "Nothing written", "\n".join(summary)
                                     or "No change was produced.")
             return
-        ok = QMessageBox.question(
-            self, "Write to file",
-            f"Target:\n{path}\n\nChanges:\n  - " + "\n  - ".join(summary)
-            + "\n\nA backup (.bak) will be made. Proceed?",
-            QMessageBox.Yes | QMessageBox.No)
+        prompt = (f"Target:\n{path}\n\nChanges:\n  - " + "\n  - ".join(summary)
+                  + "\n\nA backup (.bak) will be made. Proceed?")
+        lossy = self._lossy_warnings()
+        if lossy:
+            # this combo is rebuilt from the model, so anything the parser
+            # couldn't read is simply not in the output
+            prompt = (f"Target:\n{path}\n\nThis combo has {len(lossy)} line(s) "
+                      "the tool could not read. Rewriting it will DROP them:\n  - "
+                      + "\n  - ".join(str(w) for w in lossy[:8])
+                      + ("\n  - …" if len(lossy) > 8 else "")
+                      + "\n\nChanges:\n  - " + "\n  - ".join(summary)
+                      + "\n\nA backup (.bak) will be made. Proceed anyway?")
+        ok = QMessageBox.question(self, "Write to file", prompt,
+                                  QMessageBox.Yes | QMessageBox.No)
         if ok != QMessageBox.Yes:
             return
         backup = writer.write_file(path, new_text, backup=True)
@@ -173,6 +183,16 @@ class FileOpsMixin:
         self.loaded_path = path
         self._loaded_text = new_text
         self._add_recent(path)
+
+    def _lossy_warnings(self) -> list:
+        """The current combo's warnings whose source text isn't in the model.
+
+        Only for combos: a selector is spliced line by line, so nothing it
+        couldn't read is at risk.
+        """
+        if not isinstance(self.seq, ComboSequence):
+            return []
+        return [w for w in getattr(self.seq, "warnings", []) or [] if w.lossy]
 
     def _target_text(self):
         """Return (path, text) for the write target (loaded file, else prompt),

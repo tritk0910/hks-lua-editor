@@ -28,10 +28,37 @@ from models import (
 
 
 @dataclass
+class ParseWarning:
+    """Something in the source this parser could not model.
+
+    `line` (1-based, in the file) and `where` (the Lua function it came from)
+    are what let the UI point at it — and, more importantly, tell you before you
+    overwrite a combo that regenerating it will drop what we couldn't read.
+    """
+
+    message: str
+    line: int | None = None
+    where: str = ""
+    #: True when the source text is NOT in the model, so regenerating the
+    #: function would silently delete it. False for things kept verbatim (a
+    #: condition we couldn't decompose is still emitted as raw Lua).
+    lossy: bool = False
+
+    def __str__(self) -> str:
+        at = f"line {self.line}" if self.line else "?"
+        return f"{at} — {self.where}: {self.message}" if self.where else f"{at} — {self.message}"
+
+
+def _warn(warnings: list, message: str, lineno: int | None = None,
+          lossy: bool = False) -> None:
+    warnings.append(ParseWarning(message, lineno, lossy=lossy))
+
+
+@dataclass
 class ParseResult:
     sequences: list = field(default_factory=list)   # list[ComboSequence]
     activators: list = field(default_factory=list)  # list[KengekiActivator]
-    warnings: list = field(default_factory=list)    # list[str]
+    warnings: list = field(default_factory=list)    # list[ParseWarning]
 
 
 # --- text preprocessing ----------------------------------------------------
@@ -161,12 +188,16 @@ def _build_local_table(lines: list[tuple[int, str]]) -> dict:
 
 # --- statement / step parsing ---------------------------------------------
 
-def _parse_addsubgoal(text: str, locals_: dict, warnings: list) -> ComboStep:
+def _parse_addsubgoal(text: str, locals_: dict, warnings: list,
+                      lineno: int | None = None) -> ComboStep:
     """Parse one `argX:AddSubGoal(...)` (with any trailing `:Timing...` dropped)."""
     open_idx = text.index("AddSubGoal(") + len("AddSubGoal")
     inside, after = _balanced_call(text, open_idx)
     if after < len(text) and text[after:].lstrip().startswith(":"):
-        warnings.append(f"dropped chained call after AddSubGoal: {text[after:].strip()}")
+        # NOTE: this is the dangerous one — regenerating this combo will not
+        # bring the chained call back, so the UI warns before overwriting it.
+        _warn(warnings, f"dropped chained call after AddSubGoal: {text[after:].strip()}",
+              lineno, lossy=True)
     args = _split_top_level(inside)
     goal_type = args[0].strip()
     if goal_type.startswith("GOAL_COMMON_"):
@@ -303,7 +334,8 @@ def _has_raw(item) -> bool:
     return item.kind == "raw"
 
 
-def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
+def _classify_condition(cond: str, locals_: dict, warnings: list,
+                        lineno: int | None = None) -> Branch:
     """Turn a Lua `if` condition into a Branch whose `terms` may nest BoolNode
     groups, e.g. `(A or B) and C` -> terms=[BoolNode(or,[A,B]), C]."""
     cond = cond.strip()
@@ -313,14 +345,14 @@ def _classify_condition(cond: str, locals_: dict, warnings: list) -> Branch:
     else:
         branch = Branch(terms=[root])   # single term or a negated group
     if _has_raw(branch.terms[0] if len(branch.terms) == 1 else BoolNode("and", branch.terms)):
-        warnings.append(f"condition has un-modelled parts kept raw: {cond}")
+        _warn(warnings, f"condition has un-modelled parts kept raw: {cond}", lineno)
     return branch
 
 
 def _addsubgoal_leaf(text, locals_, warnings, lineno=None):
     """Default leaf parser: an `argX:AddSubGoal(...)` line -> ComboStep."""
     if "AddSubGoal(" in text:
-        return _parse_addsubgoal(text, locals_, warnings)
+        return _parse_addsubgoal(text, locals_, warnings, lineno)
     return None
 
 
@@ -385,9 +417,10 @@ def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_add
     contains no leaf items — e.g. Act23's param-computing ifs.
     """
     line = lines[i][1]
+    lineno = lines[i][2] if len(lines[i]) > 2 else None
     kw = "elseif " if _from_elseif else "if "
     cond = line[len(kw):-len(" then")].strip()
-    branch = _classify_condition(cond, locals_, warnings)
+    branch = _classify_condition(cond, locals_, warnings, lineno)
     branch.from_elseif = _from_elseif   # distinguishes real elseif from else{if}
     true_items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings, leaf=leaf)
     branch.true_branch = true_items
@@ -406,7 +439,8 @@ def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_add
             j += 1
     branch.false_branch = false_items
     if not branch.true_branch and not branch.false_branch:
-        warnings.append(f"skipped non-combo if: {cond}")
+        # the whole block is absent from the model -> a rewrite loses it
+        _warn(warnings, f"skipped non-combo if: {cond}", lineno, lossy=True)
         return None, j
     return branch, j
 
@@ -444,25 +478,32 @@ def _parse_approach(lines, locals_):
     return None
 
 
-def _parse_kengeki_move(name: str, body: str, warnings: list) -> ComboSequence:
+def _parse_kengeki_move(name: str, body: str, warnings: list,
+                        line_offset: int | None = None) -> ComboSequence:
     """Parse a `Goal.KengekiNN` move — like an Act but no approach, and the
     leading `arg1:ClearSubGoal()` is simply skipped as a non-combo statement."""
     num = int(re.match(r"Kengeki(\d+)", name).group(1))
-    lines = _logical_lines(body)[1:]   # drop the header line
+    lines = _logical_lines(body, line_offset)[1:]   # drop the header line
     locals_ = _build_local_table(lines)
-    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=warnings)
-    return ComboSequence(name=name, trigger_type="kengeki_move", trigger_id=num,
-                         steps=steps)
+    mine: list = []
+    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=mine)
+    seq = ComboSequence(name=name, trigger_type="kengeki_move", trigger_id=num,
+                        steps=steps)
+    return _own_warnings(seq, name, mine, warnings)
 
 
-def _parse_act(name: str, body: str, warnings: list) -> ComboSequence:
+def _parse_act(name: str, body: str, warnings: list,
+               line_offset: int | None = None) -> ComboSequence:
     num = int(re.match(r"Act(\d+)", name).group(1))
-    lines = _logical_lines(body)[1:]   # drop the `Goal.ActNN = function(...)` header
+    # drop the `Goal.ActNN = function(...)` header (line numbers stay absolute)
+    lines = _logical_lines(body, line_offset)[1:]
     locals_ = _build_local_table(lines)
     approach = _parse_approach(lines, locals_)
-    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=warnings)
-    return ComboSequence(name=name, trigger_type="act_entry", trigger_id=num,
-                         steps=steps, approach=approach)
+    mine: list = []
+    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=mine)
+    seq = ComboSequence(name=name, trigger_type="act_entry", trigger_id=num,
+                        steps=steps, approach=approach)
+    return _own_warnings(seq, name, mine, warnings)
 
 
 def _parse_kengeki_activate(body: str, warnings: list,
@@ -567,31 +608,44 @@ def _parse_activate(body: str, warnings: list,
     return ActActivator(items=items, owned_lines=_weight_lines(items))
 
 
-def _parse_interrupt(body: str, warnings: list) -> list:
+def _parse_interrupt(body: str, warnings: list,
+                     line_offset: int | None = None) -> list:
     """Parse each `elseif interruptEffectIdentifier == <id> then` branch."""
-    lines = _logical_lines(body)
+    lines = _logical_lines(body, line_offset)
     locals_ = _build_local_table(lines)
     sequences = []
     i = 0
     while i < len(lines):
-        indent, text = lines[i]
+        indent, text = lines[i][0], lines[i][1]
+        lineno = lines[i][2] if len(lines[i]) > 2 else None
         m = re.match(r"^elseif interruptEffectIdentifier == (\d+) then$", text)
         if not m:
             # compound guard, e.g. `== ID and HasSpecialEffectId(...)` -> skip+warn
             g = re.match(r"^elseif interruptEffectIdentifier == (\d+) and ", text)
             if g:
-                warnings.append(f"skipped compound interrupt guard for id {g.group(1)}")
+                _warn(warnings, f"skipped compound interrupt guard for id {g.group(1)}",
+                      lineno, lossy=True)
             i += 1
             continue
         eid = int(m.group(1))
-        steps, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings)
-        # strip a leading ClearSubGoal artefact if it slipped in (it never
-        # becomes a ComboStep, but be safe)
-        sequences.append(ComboSequence(name=f"Interrupt_{eid}",
-                                       trigger_type="special_effect",
-                                       trigger_id=eid, steps=steps))
+        # each branch collects its own warnings, so the UI can tell you what
+        # writing THIS combo would drop
+        mine: list = []
+        steps, j = _parse_block(lines, i + 1, indent + 4, locals_, mine)
+        seq = ComboSequence(name=f"Interrupt_{eid}", trigger_type="special_effect",
+                            trigger_id=eid, steps=steps)
+        sequences.append(_own_warnings(seq, "Interrupt", mine, warnings))
         i = j
     return sequences
+
+
+def _own_warnings(seq: ComboSequence, where: str, mine: list, warnings: list):
+    """Give `seq` the warnings raised while parsing it, and pass them up."""
+    for w in mine:
+        w.where = where
+    seq.warnings = mine
+    warnings.extend(mine)
+    return seq
 
 
 # --- public entry point ----------------------------------------------------
@@ -604,9 +658,10 @@ def parse_file(text: str) -> ParseResult:
         # numbers the writer can splice by
         offset = text.count("\n", 0, start) + 1
         if re.match(r"Act\d+$", name):
-            result.sequences.append(_parse_act(name, body, result.warnings))
+            result.sequences.append(_parse_act(name, body, result.warnings, offset))
         elif re.match(r"Kengeki\d+$", name):
-            result.sequences.append(_parse_kengeki_move(name, body, result.warnings))
+            result.sequences.append(
+                _parse_kengeki_move(name, body, result.warnings, offset))
         elif name == "Kengeki_Activate":
             result.activators.append(
                 _parse_kengeki_activate(body, result.warnings, offset))
@@ -614,5 +669,6 @@ def parse_file(text: str) -> ParseResult:
             result.activators.append(
                 _parse_activate(body, result.warnings, offset))
         elif name == "Interrupt":
-            result.sequences.extend(_parse_interrupt(body, result.warnings))
+            result.sequences.extend(
+                _parse_interrupt(body, result.warnings, offset))
     return result

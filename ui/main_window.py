@@ -12,7 +12,7 @@ import copy
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenuBar,
     QMessageBox,
     QPlainTextEdit,
@@ -65,6 +67,7 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self.seq = first           # the one being viewed/edited
         self.loaded_path = None    # last .lua loaded, default write target
         self._loaded_text = ""     # raw text of the loaded file (for Find in file)
+        self._warnings = []        # parser.ParseWarning from the last load
         self._originals = {}       # uid -> deepcopy snapshot at load (Revert)
         self._history = {}         # uid -> {"undo": [...], "redo": [...]}
         self._syncing = False
@@ -191,9 +194,15 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self._highlighter = LuaHighlighter(self.lua_view.document())
         self.diagram_view = QPlainTextEdit(readOnly=True)
         self.diagram_view.setFont(mono)
+        # what the parser could not model in the loaded file — double-click a
+        # row to open it in the editor
+        self.warning_view = QListWidget()
+        self.warning_view.setFont(mono)
+        self.warning_view.itemDoubleClicked.connect(self._open_warning)
         self.tabs = QTabWidget()
         self.tabs.addTab(self.lua_view, "Generated Lua")
         self.tabs.addTab(self.diagram_view, "Diagram")
+        self.tabs.addTab(self.warning_view, "Warnings")
         copy_btn = QPushButton("Copy current tab")
         copy_btn.clicked.connect(self._copy_current)
         self.status = QLabel("")
@@ -400,6 +409,7 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self.seq = first
         self.loaded_path = None
         self._loaded_text = ""
+        self._warnings = []
         self._originals = {}
         self._history = {}
         self._clipboard = None
@@ -567,6 +577,7 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
             lua = ""
             self.status.setText(f"Cannot generate Lua: {exc}")
         self.lua_view.setPlainText(lua)
+        self._refresh_warnings()
         try:
             if isinstance(self.seq, KengekiActivator):
                 diagram = visualizer.visualize_kengeki(self.seq)
@@ -577,6 +588,37 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
             self.diagram_view.setPlainText(diagram)
         except Exception as exc:
             self.diagram_view.setPlainText(f"(diagram error: {exc})")
+
+    # --- parse warnings ----------------------------------------------------
+
+    def _refresh_warnings(self):
+        """List what the parser couldn't model, the current combo's first — those
+        are the ones that decide whether writing it is lossy."""
+        self.warning_view.clear()
+        mine = list(getattr(self.seq, "warnings", []) or [])
+        rest = [w for w in self._warnings if w not in mine]
+        self.tabs.setTabText(2, f"Warnings ({len(self._warnings)})"
+                             if self._warnings else "Warnings")
+        for group, is_mine in ((mine, True), (rest, False)):
+            for w in group:
+                item = QListWidgetItem(str(w))
+                item.setData(Qt.UserRole, w.line)
+                if is_mine:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setForeground(QColor("#c0392b"))
+                self.warning_view.addItem(item)
+        if mine:
+            head = QListWidgetItem(f"── {len(mine)} in this combo, "
+                                   f"{len(rest)} elsewhere in the file ──")
+            head.setFlags(Qt.NoItemFlags)
+            self.warning_view.insertItem(0, head)
+
+    def _open_warning(self, item):
+        line = item.data(Qt.UserRole)
+        if line and self.loaded_path:
+            self._open_at_line(self.loaded_path, line)
 
     def _copy_current(self):
         text = (self.lua_view if self.tabs.currentIndex() == 0

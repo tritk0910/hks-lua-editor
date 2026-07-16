@@ -195,6 +195,20 @@ def _build_local_table(lines: list[tuple[int, str]]) -> dict:
 
 # --- statement / step parsing ---------------------------------------------
 
+# Boilerplate the combo generators reconstruct themselves — keeping it as a raw
+# line would double it (or fight the `approach` field / inlined args). Anything
+# NOT matched here and not modelled (SetNumber, SetTimer, return true,
+# ClearSubGoal, ...) is kept verbatim so it survives a rewrite, shows in the
+# tree, and — crucially — keeps its position (ClearSubGoal isn't always first).
+_COMBO_BOILERPLATE = re.compile(
+    r"^(local\s+local\d+\s*=|Approach_Act_Flex\(|GetWellSpace_Odds\s*="
+    r"|return GetWellSpace_Odds$)")
+
+
+def _keep_combo_raw(text: str) -> bool:
+    return _COMBO_BOILERPLATE.match(text) is None
+
+
 def _parse_addsubgoal(text: str, locals_: dict, warnings: list,
                       lineno: int | None = None) -> ComboStep:
     """Parse one `argX:AddSubGoal(...)` (with any trailing `:Timing...` dropped)."""
@@ -413,9 +427,11 @@ def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf
             continue
         lineno = entry[2] if len(entry) > 2 else None
         item = leaf(text, locals_, warnings, lineno)
-        if item is None and keep_raw:
+        if item is None and keep_raw and (keep_raw is True or keep_raw(text)):
             # not a leaf and not control flow: keep it verbatim rather than drop
-            # it, so the region can be regenerated without losing the line
+            # it, so the region can be regenerated without losing the line.
+            # `keep_raw` may be a predicate — combos keep only non-boilerplate
+            # (the generator re-emits ClearSubGoal / the act tail itself).
             item = RawLine(text=" " * indent + text, line=lineno)
         if item is not None:
             items.append(item)
@@ -504,7 +520,8 @@ def _parse_kengeki_move(name: str, body: str, warnings: list,
     lines = _logical_lines(body, line_offset)[1:]   # drop the header line
     locals_ = _build_local_table(lines)
     mine: list = []
-    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=mine)
+    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=mine,
+                            keep_raw=_keep_combo_raw)
     seq = ComboSequence(name=name, trigger_type="kengeki_move", trigger_id=num,
                         steps=steps)
     return _own_warnings(seq, name, mine, warnings)
@@ -518,7 +535,8 @@ def _parse_act(name: str, body: str, warnings: list,
     locals_ = _build_local_table(lines)
     approach = _parse_approach(lines, locals_)
     mine: list = []
-    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=mine)
+    steps, _ = _parse_block(lines, 0, base_indent=4, locals_=locals_, warnings=mine,
+                            keep_raw=_keep_combo_raw)
     seq = ComboSequence(name=name, trigger_type="act_entry", trigger_id=num,
                         steps=steps, approach=approach)
     return _own_warnings(seq, name, mine, warnings)
@@ -649,7 +667,8 @@ def _parse_interrupt(body: str, warnings: list,
         # each branch collects its own warnings, so the UI can tell you what
         # writing THIS combo would drop
         mine: list = []
-        steps, j = _parse_block(lines, i + 1, indent + 4, locals_, mine)
+        steps, j = _parse_block(lines, i + 1, indent + 4, locals_, mine,
+                               keep_raw=_keep_combo_raw)
         seq = ComboSequence(name=f"Interrupt_{eid}", trigger_type="special_effect",
                             trigger_id=eid, steps=steps)
         sequences.append(_own_warnings(seq, "Interrupt", mine, warnings))

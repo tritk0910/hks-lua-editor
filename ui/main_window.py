@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -43,7 +44,8 @@ from models import (
 )
 from ui.combo_dialog import ComboDialog
 from ui.combo_tree import ComboTree
-from ui.helpers import TRIGGER_TYPES, _combo_label, _index_of
+from ui.document import Document
+from ui.helpers import TRIGGER_TYPES, _combo_label, _index_of, _seed_clear_subgoal
 from ui.lua_highlighter import LuaHighlighter
 from ui.mixins.dsas_ops import DsasOpsMixin
 from ui.mixins.file_ops import FileOpsMixin
@@ -61,13 +63,11 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self.resize(1040, 660)
 
         self._next_uid = 0
-        first = self._tag(ComboSequence(name="my_combo", trigger_type="act_entry",
-                                        trigger_id=50))
-        self.combos = [first]      # every combo/activator held in memory
-        self.seq = first           # the one being viewed/edited
-        self.loaded_path = None    # last .lua loaded, default write target
-        self._loaded_text = ""     # raw text of the loaded file (for Find in file)
-        self._warnings = []        # parser.ParseWarning from the last load
+        # one Document per open file; `seq`/`combos`/`loaded_path`/... below are
+        # properties onto the current one, so the rest of the code (and the
+        # tests) keep addressing them exactly as when only one file could be open
+        self.docs = [self._new_document()]
+        self.doc = self.docs[0]
         self._originals = {}       # uid -> deepcopy snapshot at load (Revert)
         self._history = {}         # uid -> {"undo": [...], "redo": [...]}
         self._syncing = False
@@ -78,6 +78,120 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         self._refresh_selector()
         self._sync_form_from_seq()
         self.refresh()
+
+    # --- the open documents ------------------------------------------------
+    # Per-file state lives on `self.doc`; these properties keep the old names
+    # working so the mixins and tests didn't have to be rewritten around tabs.
+
+    def _new_document(self) -> Document:
+        """A fresh untitled document holding one empty starter combo."""
+        first = self._tag(ComboSequence(name="my_combo", trigger_type="act_entry",
+                                        trigger_id=50))
+        return Document(combos=[first], current=first)
+
+    @property
+    def seq(self):
+        return self.doc.current
+
+    @seq.setter
+    def seq(self, value):
+        self.doc.current = value
+
+    @property
+    def combos(self):
+        return self.doc.combos
+
+    @combos.setter
+    def combos(self, value):
+        self.doc.combos = value
+
+    @property
+    def loaded_path(self):
+        return self.doc.path
+
+    @loaded_path.setter
+    def loaded_path(self, value):
+        self.doc.path = value
+
+    @property
+    def _loaded_text(self):
+        return self.doc.text
+
+    @_loaded_text.setter
+    def _loaded_text(self, value):
+        self.doc.text = value
+
+    @property
+    def _warnings(self):
+        return self.doc.warnings
+
+    @_warnings.setter
+    def _warnings(self, value):
+        self.doc.warnings = value
+
+    def _refresh_file_tabs(self):
+        """Rebuild the tab bar from `self.docs` and select the current one."""
+        self._syncing = True
+        try:
+            while self.file_tabs.count():
+                self.file_tabs.removeTab(0)
+            for doc in self.docs:
+                i = self.file_tabs.addTab(doc.title)
+                self.file_tabs.setTabToolTip(i, doc.path or "not saved to a file yet")
+            self.file_tabs.setCurrentIndex(_index_of(self.docs, self.doc))
+        finally:
+            self._syncing = False
+
+    def _on_file_tab_changed(self, index: int):
+        if self._syncing or not (0 <= index < len(self.docs)):
+            return
+        self._show_document(self.docs[index])
+
+    def _show_document(self, doc: Document):
+        self.doc = doc
+        self._refresh_selector()
+        self._sync_form_from_seq()
+        self.refresh()
+
+    def _open_document(self, doc: Document):
+        """Add a document and switch to it, reusing an untouched scratch tab."""
+        if self.doc.is_pristine() and self.doc in self.docs:
+            self.docs[_index_of(self.docs, self.doc)] = doc
+        else:
+            self.docs.append(doc)
+        self.doc = doc
+        self._refresh_file_tabs()
+        self._show_document(doc)
+
+    def _document_for(self, path: str):
+        """An already-open document for `path`, if any (don't open it twice)."""
+        key = os.path.normcase(os.path.abspath(path))
+        for doc in self.docs:
+            if doc.path and os.path.normcase(os.path.abspath(doc.path)) == key:
+                return doc
+        return None
+
+    def _close_document(self, index: int):
+        if not (0 <= index < len(self.docs)):
+            return
+        doc = self.docs[index]
+        previous, self.doc = self.doc, doc     # ask about the tab being closed
+        try:
+            if not self._confirm_discard("Close file"):
+                return
+        finally:
+            self.doc = previous
+        for combo in doc.combos:               # its per-combo state goes with it
+            uid = getattr(combo, "_uid", None)
+            self._originals.pop(uid, None)
+            self._history.pop(uid, None)
+        del self.docs[index]
+        if not self.docs:                      # never leave the window empty
+            self.docs = [self._new_document()]
+        if doc is self.doc:
+            self.doc = self.docs[min(index, len(self.docs) - 1)]
+        self._refresh_file_tabs()
+        self._show_document(self.doc)
 
     # --- construction ------------------------------------------------------
 
@@ -218,9 +332,19 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
         splitter.addWidget(left_widget)
         splitter.addWidget(right_widget)
         splitter.setSizes([560, 480])
+        # one tab per open file, across the top like an editor
+        self.file_tabs = QTabBar()
+        self.file_tabs.setTabsClosable(True)
+        self.file_tabs.setMovable(True)
+        self.file_tabs.setExpanding(False)
+        self.file_tabs.currentChanged.connect(self._on_file_tab_changed)
+        self.file_tabs.tabCloseRequested.connect(self._close_document)
+
         root = QVBoxLayout(self)
         root.setMenuBar(self._build_menu())
+        root.addWidget(self.file_tabs)
         root.addWidget(splitter)
+        self._refresh_file_tabs()
 
     def _build_menu(self) -> QMenuBar:
         bar = QMenuBar(self)
@@ -345,6 +469,7 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
             QMessageBox.warning(self, "Already exists",
                                 reason + "\n\nChoose different props.")
         seq = self._tag(ComboSequence(name=name, trigger_type=ttype, trigger_id=tid))
+        _seed_clear_subgoal(seq)     # interrupt/kengeki bodies start with one
         self.combos.append(seq)
         self.seq = seq
         self._refresh_selector()
@@ -399,25 +524,11 @@ class MainWindow(TreeEditMixin, FileOpsMixin, RecentFilesMixin, FindOpsMixin,
             event.ignore()
 
     def _close_file(self):
-        """Discard the loaded file and all combos, returning to the fresh
-        startup state (a single empty default combo, no write target)."""
-        if not self._confirm_discard("Close file"):
-            return
-        first = self._tag(ComboSequence(name="my_combo", trigger_type="act_entry",
-                                        trigger_id=50))
-        self.combos = [first]
-        self.seq = first
-        self.loaded_path = None
-        self._loaded_text = ""
-        self._warnings = []
-        self._originals = {}
-        self._history = {}
-        self._clipboard = None
-        self._refresh_selector()
-        self._sync_form_from_seq()
-        self.refresh()
+        """Close the current tab (the other open files stay open)."""
+        title = self.doc.title
+        self._close_document(_index_of(self.docs, self.doc))
         self.status.setStyleSheet("color: gray;")
-        self.status.setText("Closed file — back to default state")
+        self.status.setText(f"Closed {title}")
 
     def _tag(self, combo):
         """Give a combo a stable uid (survives deepcopy) for history/revert."""

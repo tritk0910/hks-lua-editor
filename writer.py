@@ -308,6 +308,18 @@ def apply_sequence(text: str, seq, cooldown=None, target="TARGET_SELF"
     if not isinstance(seq, ComboSequence):
         return text, [f"cannot write {type(seq).__name__}"]
 
+    # Replacing a combo regenerates the whole function/branch from the model. If
+    # the generator can't reproduce what's on disk AND nothing already warns why
+    # (a chained :Timing call is surfaced separately, and the user may choose to
+    # drop it), the difference is silent — e.g. Act args inlined from `local`s —
+    # so a rewrite could change lines the user never touched. Refuse those.
+    lossy_known = any(getattr(w, "lossy", False) for w in getattr(seq, "warnings", []))
+    if not lossy_known and not _combo_is_faithful(text, seq):
+        return text, ["This combo has parts the tool can't reproduce exactly "
+                      "(e.g. values inlined from `local`s). It shows and edits "
+                      "here, but writing could change lines you didn't touch, so "
+                      "it was NOT written."]
+
     summary: list[str] = []
     if seq.trigger_type == "act_entry":
         text = _apply_new_function(text, seq, "Act", seq.trigger_id,
@@ -327,6 +339,41 @@ def apply_sequence(text: str, seq, cooldown=None, target="TARGET_SELF"
     else:
         summary.append(f"unknown trigger_type: {seq.trigger_type}")
     return text, summary
+
+
+def _combo_is_faithful(text: str, seq) -> bool:
+    """Does the generator reproduce this combo's function/branch exactly as it
+    stands in `text`? True (nothing to preserve) when it doesn't exist yet."""
+    from parser import parse_file
+
+    def reparsed(pred):
+        return next((s for s in parse_file(text).sequences if pred(s)), None)
+
+    if seq.trigger_type in ("act_entry", "kengeki_move"):
+        fam = "Act" if seq.trigger_type == "act_entry" else "Kengeki"
+        name = f"{fam}{seq.trigger_id:02d}"
+        span = next(((s, e) for n, s, e in iter_function_spans(text) if n == name), None)
+        if span is None:
+            return True
+        fresh = reparsed(lambda s: s.trigger_type == seq.trigger_type
+                         and s.trigger_id == seq.trigger_id)
+        if fresh is None:
+            return False
+        gen = (generator.generate_act(fresh) if seq.trigger_type == "act_entry"
+               else generator.generate_kengeki_move(fresh))
+        return gen.rstrip("\n") == text[span[0]:span[1]].rstrip("\n")
+
+    if seq.trigger_type == "special_effect":
+        span = _existing_branch_span(text, seq.trigger_id)
+        if span is None:
+            return True
+        fresh = reparsed(lambda s: s.trigger_type == "special_effect"
+                         and s.trigger_id == seq.trigger_id)
+        if fresh is None:
+            return False
+        return (generator.generate_interrupt_branch(fresh).rstrip("\n")
+                == text[span[0]:span[1]].rstrip("\n"))
+    return True
 
 
 # --- selector weight tables (Goal.Activate / Goal.Kengeki_Activate) --------

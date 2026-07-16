@@ -58,8 +58,8 @@ def test_act01_approach(parsed):
 
 def test_interrupt_5031_random_two_finals(parsed):
     seq = _interrupt(parsed, 5031)
-    branch = seq.steps[0]
-    assert isinstance(branch, Branch)
+    # steps[0] is now the ClearSubGoal RawLine kept verbatim; the branch follows
+    branch = next(s for s in seq.steps if isinstance(s, Branch))
     assert branch.terms[0].kind == "randam"
     assert branch.terms[0].threshold == 50
     assert branch.true_branch[0].anim_id == 3049
@@ -158,6 +158,7 @@ def test_kengeki01_roundtrip(parsed):
     seq = _kengeki(parsed, 1)
     expected = (
         "Goal.Kengeki01 = function(arg0, arg1, arg2)\n"
+        "    arg0:SetNumber(3, 1)\n"          # kept verbatim now (was silently dropped)
         "    arg1:ClearSubGoal()\n"
         "    arg1:AddSubGoal(GOAL_COMMON_ComboFinal, 10, 3050, TARGET_ENE_0, 9999, 0, 0)\n"
         "end"

@@ -28,6 +28,18 @@ def _count_weights(items) -> int:
     return n
 
 
+def _seed_clear_subgoal(seq) -> None:
+    """Give a fresh interrupt/kengeki combo the `ClearSubGoal()` its body starts
+    with. It lives in the model as a RawLine (kept, movable, removable) rather
+    than being magicked in by the generator, so a combo parsed WITHOUT one keeps
+    round-tripping without one."""
+    from models import RawLine
+    if seq.trigger_type == "special_effect":
+        seq.steps.insert(0, RawLine("            arg2:ClearSubGoal()"))   # 12 spaces
+    elif seq.trigger_type == "kengeki_move":
+        seq.steps.insert(0, RawLine("    arg1:ClearSubGoal()"))            # 4 spaces
+
+
 def _index_of(lst, obj) -> int:
     """Index of `obj` in `lst` by IDENTITY, not equality. Dataclass instances
     compare equal by value, so a duplicated step/branch would make list.index()

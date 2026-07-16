@@ -120,7 +120,9 @@ def render_items(items, receiver: str, ctx: str, indent: str = "") -> str:
     """
     lines: list[str] = []
     for item in items:
-        if isinstance(item, ComboStep):
+        if isinstance(item, RawLine):
+            lines.append(item.text)          # verbatim — indentation baked in
+        elif isinstance(item, ComboStep):
             lines.append(render_step(item, receiver, indent))
         elif isinstance(item, Branch):
             # ladder: emit if / elseif (from_elseif arms) / else — matches the
@@ -168,10 +170,13 @@ def generate_act(seq: ComboSequence) -> str:
 
 def generate_interrupt_branch(seq: ComboSequence) -> str:
     """An `elseif interruptEffectIdentifier == <id> then` block for an
-    Interrupt combo. Starts with `arg2:ClearSubGoal()`, uses the arg2 receiver.
+    Interrupt combo, using the arg2 receiver.
 
-    Emitted at 8-space base indent to match the nesting inside
-    `Goal.Interrupt` (inside the `if IsInterupt(...)` block, e.g. line 911).
+    The body (usually a leading `arg2:ClearSubGoal()`, but not always — some
+    branches just `return`) is rendered from the combo's items, so it round-trips
+    exactly. New combos are seeded with a ClearSubGoal by the UI.
+
+    Emitted at 8-space base indent to match the nesting inside `Goal.Interrupt`.
     """
     if seq.trigger_type != "special_effect":
         raise ValueError("generate_interrupt_branch expects trigger_type == 'special_effect'")
@@ -180,7 +185,6 @@ def generate_interrupt_branch(seq: ComboSequence) -> str:
     body = render_items(seq.steps, receiver="arg2", ctx="interrupt", indent=inner)
     return (
         f"{base}elseif interruptEffectIdentifier == {seq.trigger_id} then\n"
-        f"{inner}arg2:ClearSubGoal()\n"
         f"{body}"
     )
 
@@ -188,21 +192,16 @@ def generate_interrupt_branch(seq: ComboSequence) -> str:
 def generate_kengeki_move(seq: ComboSequence) -> str:
     """A complete `Goal.KengekiNN` move function for a kengeki_move combo.
 
-    Structurally like an Act combo but: starts with `arg1:ClearSubGoal()`,
-    uses the arg1 receiver, and has NO `GetWellSpace_Odds` wrapper. NN is
-    zero-padded from seq.trigger_id (Kengeki01, Kengeki43, ...). See
-    710300_battle.lua line 1573 (Goal.Kengeki01).
+    Structurally like an Act combo but: the arg1 receiver and NO
+    `GetWellSpace_Odds` wrapper. The `arg1:ClearSubGoal()` a move starts with is
+    part of the body (rendered from items), so it round-trips exactly. NN is
+    zero-padded from seq.trigger_id (Kengeki01, Kengeki43, ...).
     """
     if seq.trigger_type != "kengeki_move":
         raise ValueError("generate_kengeki_move expects trigger_type == 'kengeki_move'")
     name = f"Goal.Kengeki{seq.trigger_id:02d}"
     body = render_items(seq.steps, receiver="arg1", ctx="act", indent=INDENT)
-    return (
-        f"{name} = function(arg0, arg1, arg2)\n"
-        f"{INDENT}arg1:ClearSubGoal()\n"
-        f"{body}\n"
-        f"end"
-    )
+    return f"{name} = function(arg0, arg1, arg2)\n{body}\nend"
 
 
 # --- Kengeki_Activate selector --------------------------------------------

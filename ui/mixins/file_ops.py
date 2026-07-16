@@ -13,7 +13,8 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 import generator
 import writer
-from models import ComboSequence, is_activator
+from models import ComboSequence
+from ui.document import Document
 from parser import parse_file
 
 
@@ -68,8 +69,14 @@ class FileOpsMixin:
             self._load_path(path)
 
     def _load_path(self, path: str) -> bool:
-        """Parse `path` and load its combos. Returns True on success; leaves
-        state unchanged (and warns) if nothing parsed or the read fails."""
+        """Open `path` in its own tab. Returns True on success; leaves state
+        unchanged (and warns) if nothing parsed or the read fails."""
+        already = self._document_for(path)
+        if already is not None:      # same file twice -> just go to its tab
+            self.doc = already
+            self._refresh_file_tabs()
+            self._show_document(already)
+            return True
         try:
             with open(path, encoding="utf-8", errors="ignore") as f:
                 text = f.read()
@@ -82,19 +89,14 @@ class FileOpsMixin:
             QMessageBox.warning(self, "Nothing parsed",
                                 "No combos or kengeki selector were found.")
             return False
-        self._loaded_text = text
-        self._warnings = list(result.warnings)
-        self.loaded_path = path
         for it in items:                          # uid + original snapshot for revert
             self._tag(it)
             self._originals[it._uid] = copy.deepcopy(it)
-        # drop untouched placeholder combos (default my_combo / New with no steps)
-        self.combos = [c for c in self.combos
-                       if is_activator(c) or c.steps] + items
-        self.seq = items[0]
-        self._refresh_selector()
-        self._sync_form_from_seq()
-        self.refresh()
+        # its own tab: combos must never mix with another file's, or writing one
+        # would splice it into the other file
+        self._open_document(Document(path=path, text=text,
+                                     warnings=list(result.warnings),
+                                     combos=items, current=items[0]))
         self._add_recent(path)
         self.status.setStyleSheet("color: #27ae60;")
         self.status.setText(f"Loaded {len(items)} items "

@@ -17,7 +17,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QMessageBox, QTreeWidgetItem
 
 from models import (
-    ActActivator, Branch, ComboStep, KengekiActivator, Weight, unchain_branch,
+    ActActivator, Branch, ComboStep, KengekiActivator, RawLine, Weight,
+    unchain_branch,
 )
 from visualizer import condition_text
 from ui.branch_dialog import BranchDialog
@@ -200,7 +201,7 @@ class TreeEditMixin:
     def _remove_selected(self):
         """Remove every selected row, not just the focused one."""
         sel = [d for d in (self._payload_of(it) for it in self.tree.selectedItems())
-               if d and d["kind"] in ("step", "branch", "weight")]
+               if d and d["kind"] in ("step", "branch", "weight", "raw")]
         if not sel:
             data = self._selected_obj_data()   # nothing selected: use the current row
             if data is None:
@@ -397,7 +398,7 @@ class TreeEditMixin:
         if not self._is_combo():
             return False        # selector weights are edited in place, not moved
         dragged = [d for d in (self._payload_of(it) for it in self.tree.selectedItems())
-                   if d and d["kind"] in ("step", "branch")]
+                   if d and d["kind"] in ("step", "branch", "raw")]
         if not dragged:
             return False
         dest = self._drop_destination(target, position)
@@ -544,6 +545,14 @@ class TreeEditMixin:
                 self._store_payload(node, {"kind": "weight", "obj": obj,
                                            "list": items_list, "owner": owner,
                                            "owner_list": owner_list})
+            elif isinstance(obj, RawLine):
+                # a statement we keep verbatim (SetNumber, ClearSubGoal, return…):
+                # show it, let it move/remove, but don't pretend it's editable
+                node = QTreeWidgetItem(parent, [obj.text.strip()])
+                node.setForeground(0, QColor("#8a6d3b"))
+                node.setFlags(node.flags() & ~Qt.ItemIsDropEnabled)   # drop between
+                self._store_payload(node, {"kind": "raw", "obj": obj, "list": items_list,
+                                           "owner": owner, "owner_list": owner_list})
             elif isinstance(obj, ComboStep):
                 extra = ", ".join(str(a) for a in obj.extra_args)
                 node = QTreeWidgetItem(parent, [obj.goal_type, str(obj.anim_id),

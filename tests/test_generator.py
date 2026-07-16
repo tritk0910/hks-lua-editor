@@ -1,6 +1,7 @@
 """Golden-string tests for generator.py, anchored to 710300_battle.lua."""
 
 from models import (
+    RawLine,
     Branch, ComboSequence, ComboStep,
     randam, state, ninsatsu, speffect, raw, and_, or_,
 )
@@ -73,9 +74,12 @@ def test_generate_act_random_branch():
 
 def test_generate_interrupt_branch_matches_5031():
     # Reference elseif interruptEffectIdentifier == 5031, lines 911-917
+    # ClearSubGoal is part of the body now (a RawLine), not magicked in by the
+    # generator — this is what the UI seeds a fresh interrupt combo with.
     seq = ComboSequence(
         name="kick", trigger_type="special_effect", trigger_id=5031,
         steps=[
+            RawLine("            arg2:ClearSubGoal()"),
             Branch(
                 terms=[randam(50)],
                 true_branch=[ComboStep("ComboFinal", 3049, 10, extra_args=[0])],

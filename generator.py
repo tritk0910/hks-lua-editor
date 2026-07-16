@@ -17,6 +17,7 @@ from models import (
     ComboSequence,
     ComboStep,
     KengekiActivator,
+    RawLine,
     Weight,
     unchain_branch,
 )
@@ -211,7 +212,9 @@ def _render_kengeki_items(items, indent: str, table: str = "kengeki") -> str:
     leaves are `<table>[index] = value` assignments — `kengeki` or `act`)."""
     lines = []
     for item in items:
-        if isinstance(item, Weight):
+        if isinstance(item, RawLine):
+            lines.append(item.text)          # verbatim — that is the whole point
+        elif isinstance(item, Weight):
             lines.append(f"{indent}{table}[{item.index}] = {item.value}")
         elif isinstance(item, Branch):
             # the selectors read values via arg1 (arg2 is the step object)
@@ -241,7 +244,7 @@ def generate_act_activate(activator) -> str:
     return _render_kengeki_items(activator.items, INDENT, table="act")
 
 
-def generate_kengeki_activate(activator: KengekiActivator) -> str:
+def generate_kengeki_activate(activator: KengekiActivator, indent: str = "") -> str:
     """The `if/elseif local0 == <effect_id> then ... end` selector chain of
     Goal.Kengeki_Activate, followed by the veto blocks that run whichever effect
     matched. Emits just those (the surrounding preamble and REGIST_FUNC tail are
@@ -249,11 +252,11 @@ def generate_kengeki_activate(activator: KengekiActivator) -> str:
     parts = []
     for idx, block in enumerate(activator.blocks):
         kw = "if" if idx == 0 else "elseif"
-        body = _render_kengeki_items(block.items, INDENT)
-        parts.append(f"{kw} local0 == {block.effect_id} then\n{body}")
-    chain = "\n".join(parts) + "\nend" if parts else ""
+        body = _render_kengeki_items(block.items, indent + INDENT)
+        parts.append(f"{indent}{kw} local0 == {block.effect_id} then\n{body}")
+    chain = "\n".join(parts) + f"\n{indent}end" if parts else ""
     # the vetoes sit at the same level as the chain, after its `end`
-    vetoes = _render_kengeki_items(activator.extra_items, "")
+    vetoes = _render_kengeki_items(activator.extra_items, indent)
     return "\n".join(p for p in (chain, vetoes) if p)
 
 

@@ -12,6 +12,7 @@ data model.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ import generator
 from models import (
     ActActivator, Branch, ComboSequence, ComboStep, Weight, is_activator,
 )
+from generator import INDENT
 from parser import iter_function_spans
 
 # Which enclosing Goal function holds the REGIST_FUNC / SetCoolTime block for a
@@ -371,6 +373,115 @@ def _scan_weight_lines(text: str, table: str) -> dict:
     return found
 
 
+def _model_lines(items) -> set:
+    """Every file line the items in a selector region came from."""
+    lines = set()
+    for it in items:
+        line = getattr(it, "line", None)
+        if line is not None:
+            lines.add(line)
+        if isinstance(it, Branch):
+            lines |= _model_lines(it.true_branch) | _model_lines(it.false_branch)
+    return lines
+
+
+def _region_span(text: str, activator) -> tuple[int, int] | None:
+    """(first, last) file lines of the region this activator was parsed from.
+
+    Runs from its first modelled line to the `end` that closes the ladder, i.e.
+    the last line before the cooldown block.
+    """
+    lists = _activator_lists(activator)
+    lines = set()
+    for items in lists:
+        lines |= _model_lines(items)
+    if not lines:
+        return None
+    src = text.split("\n")
+    cooldown = re.compile(r"^\s*\w+\[\d+\] = SetCoolTime\(")
+    last = None
+    for n in range(max(lines), len(src) + 1):
+        if cooldown.match(src[n - 1]):
+            last = n - 1
+            break
+    if last is None:
+        return None
+    while last > 0 and not src[last - 1].strip():
+        last -= 1
+    return min(lines), last
+
+
+def _render_region(activator) -> str:
+    if isinstance(activator, ActActivator):
+        return generator._render_kengeki_items(activator.items, INDENT, table="act")
+    return generator.generate_kengeki_activate(activator, indent=INDENT)
+
+
+def region_is_faithful(text: str, activator) -> bool:
+    """Can we regenerate this region without changing anything we didn't mean to?
+
+    Re-parses the region straight out of `text` and renders it back: if that is
+    byte-for-byte what the file already says, the generator reproduces this
+    region exactly, so replacing it with an edited model only changes the edit.
+    If it doesn't match, we must not rewrite the region — hence this proves
+    itself per file rather than trusting a hard-coded list of "safe" shapes.
+    """
+    span = _region_span(text, activator)
+    if span is None:
+        return False
+    fresh = _reparse_activator(text, type(activator))
+    if fresh is None:
+        return False
+    first, last = span
+    return _render_region(fresh) == "\n".join(text.split("\n")[first - 1:last])
+
+
+def _without_weights(items) -> list:
+    """The items with every Weight dropped, branches kept."""
+    out = []
+    for it in items:
+        if isinstance(it, Weight):
+            continue
+        if isinstance(it, Branch):
+            it = copy.deepcopy(it)
+            it.true_branch = _without_weights(it.true_branch)
+            it.false_branch = _without_weights(it.false_branch)
+        out.append(it)
+    return out
+
+
+def _skeleton(activator) -> str:
+    """The region rendered with the weights taken out — i.e. its conditions,
+    raw lines and shape.
+
+    Used to tell an edit the weight splice CAN write (a value, an added or
+    removed assignment) from one it can't (an edited condition). Comparing full
+    renders would push weight edits down the region-rewrite path too, which is
+    gated and would refuse where the splice happily works today.
+    """
+    shell = copy.deepcopy(activator)
+    if isinstance(shell, ActActivator):
+        shell.items = _without_weights(shell.items)
+    else:
+        for block in shell.blocks:
+            block.items = _without_weights(block.items)
+        shell.extra_items = _without_weights(shell.extra_items)
+    return _render_region(shell)
+
+
+def _has_structural_edit(text: str, activator) -> bool:
+    fresh = _reparse_activator(text, type(activator))
+    return fresh is not None and _skeleton(activator) != _skeleton(fresh)
+
+
+def _reparse_activator(text: str, kind):
+    from parser import parse_file
+    for a in parse_file(text).activators:
+        if isinstance(a, kind):
+            return a
+    return None
+
+
 def apply_activator(text: str, activator) -> tuple[str, list[str]]:
     """Write an edited weight table back by splicing individual LINES.
 
@@ -387,6 +498,23 @@ def apply_activator(text: str, activator) -> tuple[str, list[str]]:
     the file, rather than risk editing the wrong line.
     """
     table, weights = _activator_parts(activator)
+
+    # Anything other than a weight value (an edited condition, say) can only be
+    # written by rewriting the whole region — but only when we can prove the
+    # generator reproduces this region exactly. Otherwise say so; silently
+    # keeping the user's edit out of the file is what this replaces.
+    if _has_structural_edit(text, activator):
+        if not region_is_faithful(text, activator):
+            return text, ["Structure changes can't be written for this file: the "
+                          "tool cannot reproduce this region exactly, so rewriting "
+                          "it would alter lines you did not touch. Weight values "
+                          "still save."]
+        span = _region_span(text, activator)
+        lines = text.split("\n")
+        first, last = span
+        new = lines[:first - 1] + _render_region(activator).split("\n") + lines[last:]
+        return "\n".join(new), ["Rewrite the whole selector region (structure edit)"]
+
     owned = getattr(activator, "owned_lines", set())
     on_disk = {n: v for n, v in _scan_weight_lines(text, table).items()
                if n in owned}

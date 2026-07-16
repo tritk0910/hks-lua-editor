@@ -18,6 +18,7 @@ from models import (
     ComboSequence,
     ComboStep,
     KengekiActivator,
+    RawLine,
     Weight,
     unchain_branch,
 )
@@ -87,7 +88,9 @@ def _rows(items, leaf_fn):
     """One level as display rows: (label, children | None, note)."""
     out = []
     for item in items:
-        if isinstance(item, Branch):
+        if isinstance(item, RawLine):
+            out.append((item.text.strip(), None, "◀ kept as-is"))
+        elif isinstance(item, Branch):
             arms, else_items = unchain_branch(item, items)
             pct = _randam_percent(arms[0][0])   # unchain yields (arm, its list)
             for k, (arm, _lst) in enumerate(arms):

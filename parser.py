@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from models import (
     ActActivator,
+    RawLine,
     BoolNode,
     Branch,
     ComboSequence,
@@ -70,7 +71,8 @@ def _strip_comment(line: str) -> str:
     return line[:idx] if idx != -1 else line
 
 
-def _logical_lines(text: str, line_offset: int | None = None) -> list[tuple]:
+def _logical_lines(text: str, line_offset: int | None = None,
+                   keep_comments: bool = False) -> list[tuple]:
     """Return (indent, text) for each *logical* line: comments stripped, blank
     lines dropped, and statements that span physical lines (unbalanced parens,
     e.g. a wrapped `:TimingSetNumber(...)`) joined into one.
@@ -89,6 +91,11 @@ def _logical_lines(text: str, line_offset: int | None = None) -> list[tuple]:
         stripped_comment = _strip_comment(raw)
         if not buf:
             if not stripped_comment.strip():
+                # a comment-only line strips to nothing; a region rewrite has to
+                # put it back, so hand it out verbatim when asked
+                if keep_comments and raw.strip().startswith("--"):
+                    out.append((len(raw) - len(raw.lstrip()), raw.strip(),
+                                (line_offset or 1) + n))
                 continue
             indent = len(stripped_comment) - len(stripped_comment.lstrip())
             buf = stripped_comment.strip()
@@ -378,7 +385,8 @@ _kengeki_leaf = _weight_leaf("kengeki")
 _act_leaf = _weight_leaf("act")
 
 
-def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf):
+def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf,
+                 keep_raw: bool = False):
     """Recursively parse logical lines into list[<leaf> | Branch].
 
     `leaf(text, locals_, warnings, lineno)` returns a leaf item for a
@@ -398,18 +406,25 @@ def _parse_block(lines, i, base_indent, locals_, warnings, leaf=_addsubgoal_leaf
         if head in ("else", "elseif", "end"):
             break
         if text.startswith("if ") and text.endswith(" then"):
-            branch, i = _parse_if(lines, i, indent, locals_, warnings, leaf=leaf)
+            branch, i = _parse_if(lines, i, indent, locals_, warnings, leaf=leaf,
+                                  keep_raw=keep_raw)
             if branch is not None:
                 items.append(branch)
             continue
-        item = leaf(text, locals_, warnings, entry[2] if len(entry) > 2 else None)
+        lineno = entry[2] if len(entry) > 2 else None
+        item = leaf(text, locals_, warnings, lineno)
+        if item is None and keep_raw:
+            # not a leaf and not control flow: keep it verbatim rather than drop
+            # it, so the region can be regenerated without losing the line
+            item = RawLine(text=" " * indent + text, line=lineno)
         if item is not None:
             items.append(item)
         i += 1
     return items, i
 
 
-def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_addsubgoal_leaf):
+def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False,
+              leaf=_addsubgoal_leaf, keep_raw: bool = False):
     """Parse `if <cond> then ... [elseif/else ...] end` at `indent`.
 
     Returns (Branch | None, next_index). An `if/elseif` chain becomes nested
@@ -421,19 +436,22 @@ def _parse_if(lines, i, indent, locals_, warnings, _from_elseif=False, leaf=_add
     kw = "elseif " if _from_elseif else "if "
     cond = line[len(kw):-len(" then")].strip()
     branch = _classify_condition(cond, locals_, warnings, lineno)
+    branch.line = lineno
     branch.from_elseif = _from_elseif   # distinguishes real elseif from else{if}
-    true_items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings, leaf=leaf)
+    true_items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings,
+                                 leaf=leaf, keep_raw=keep_raw)
     branch.true_branch = true_items
     false_items = []
     if j < len(lines) and lines[j][0] == indent:
         nxt = lines[j][1]
         if nxt.startswith("elseif ") and nxt.endswith(" then"):
             nested, j = _parse_if(lines, j, indent, locals_, warnings,
-                                  _from_elseif=True, leaf=leaf)
+                                  _from_elseif=True, leaf=leaf, keep_raw=keep_raw)
             if nested is not None:
                 false_items = [nested]
         elif nxt.split(None, 1)[0] == "else":
-            false_items, j = _parse_block(lines, j + 1, indent + 4, locals_, warnings, leaf=leaf)
+            false_items, j = _parse_block(lines, j + 1, indent + 4, locals_,
+                                          warnings, leaf=leaf, keep_raw=keep_raw)
     if not _from_elseif:
         if j < len(lines) and lines[j][0] == indent and lines[j][1].strip() == "end":
             j += 1
@@ -512,7 +530,7 @@ def _parse_kengeki_activate(body: str, warnings: list,
     Goal.Kengeki_Activate into a KengekiActivator. The `== 0` guard block and
     the trailing REGIST_FUNC / Common_Kengeki_Activate boilerplate are ignored.
     """
-    lines = _logical_lines(body, line_offset)[1:]   # drop the header line
+    lines = _logical_lines(body, line_offset, keep_comments=True)[1:]
     locals_ = _build_local_table(lines)
     activator = KengekiActivator()
     i = 0
@@ -525,7 +543,7 @@ def _parse_kengeki_activate(body: str, warnings: list,
             continue
         eid = int(m.group(1))
         items, j = _parse_block(lines, i + 1, indent + 4, locals_, warnings,
-                                leaf=_kengeki_leaf)
+                                leaf=_kengeki_leaf, keep_raw=True)
         if eid != 0:   # `== 0` is the "no kengeki effect" guard, not a block
             activator.blocks.append(KengekiEffectBlock(effect_id=eid, items=items))
         i = chain_end = j
@@ -537,7 +555,7 @@ def _parse_kengeki_activate(body: str, warnings: list,
     if start != end:
         activator.extra_items, _ = _parse_block(
             lines[chain_end + start:chain_end + end], 0, 4, locals_, warnings,
-            leaf=_kengeki_leaf)
+            leaf=_kengeki_leaf, keep_raw=True)
 
     activator.owned_lines = _weight_lines(
         [it for b in activator.blocks for it in b.items] + activator.extra_items)
@@ -598,13 +616,13 @@ def _parse_activate(body: str, warnings: list,
     arbitrary conditions — so this is the plain statement list of the region
     (the main if/elseif ladder plus the standalone veto blocks after it).
     """
-    lines = _logical_lines(body, line_offset)
+    lines = _logical_lines(body, line_offset, keep_comments=True)
     locals_ = _build_local_table(lines)
     start, end = weight_region(lines, "act")
     if start == end:
         return ActActivator()
     items, _ = _parse_block(lines[start:end], 0, 4, locals_, warnings,
-                            leaf=_act_leaf)
+                            leaf=_act_leaf, keep_raw=True)
     return ActActivator(items=items, owned_lines=_weight_lines(items))
 
 

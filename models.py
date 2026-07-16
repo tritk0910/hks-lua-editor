@@ -114,6 +114,9 @@ class Branch:
     from_elseif: bool = False
     true_branch: list = field(default_factory=list)   # list[ComboStep | Branch]
     false_branch: list = field(default_factory=list)
+    #: source line of this arm's `if`/`elseif`, when parsed from a file. Kept
+    #: out of __eq__ so two structurally identical branches still compare equal.
+    line: int | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -186,6 +189,19 @@ class KengekiActivator:
     blocks: list = field(default_factory=list)  # list[KengekiEffectBlock]
     extra_items: list = field(default_factory=list)   # list[Weight | Branch]
     owned_lines: set = field(default_factory=set)
+
+
+@dataclass
+class RawLine:
+    """A line inside a selector region kept exactly as written.
+
+    Comments and statements the parser can't model (`arg1:SetNumber(2, 0)`)
+    would otherwise be dropped, and regenerating the region would delete them.
+    Carrying them verbatim is what makes a region rewrite lossless.
+    """
+
+    text: str                  # the whole source line, indentation included
+    line: int | None = None
 
 
 @dataclass

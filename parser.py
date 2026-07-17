@@ -211,14 +211,11 @@ def _keep_combo_raw(text: str) -> bool:
 
 def _parse_addsubgoal(text: str, locals_: dict, warnings: list,
                       lineno: int | None = None) -> ComboStep:
-    """Parse one `argX:AddSubGoal(...)` (with any trailing `:Timing...` dropped)."""
+    """Parse one `argX:AddSubGoal(...)`, keeping any trailing `:Timing...` chain
+    verbatim so a rewrite reproduces it."""
     open_idx = text.index("AddSubGoal(") + len("AddSubGoal")
     inside, after = _balanced_call(text, open_idx)
-    if after < len(text) and text[after:].lstrip().startswith(":"):
-        # NOTE: this is the dangerous one — regenerating this combo will not
-        # bring the chained call back, so the UI warns before overwriting it.
-        _warn(warnings, f"dropped chained call after AddSubGoal: {text[after:].strip()}",
-              lineno, lossy=True)
+    chained = text[after:] if after < len(text) and text[after:].lstrip().startswith(":") else ""
     args = _split_top_level(inside)
     goal_type = args[0].strip()
     if goal_type.startswith("GOAL_COMMON_"):
@@ -229,7 +226,8 @@ def _parse_addsubgoal(text: str, locals_: dict, warnings: list,
     distance = _resolve(args[4], locals_) if len(args) > 4 else 9999
     extra = [_resolve(a, locals_) for a in args[5:]]
     return ComboStep(goal_type=goal_type, anim_id=anim_id, priority=priority,
-                     distance=distance, target=target, extra_args=extra)
+                     distance=distance, target=target, extra_args=extra,
+                     chained=chained, line=lineno)
 
 
 def _tokenize_cond(s: str):

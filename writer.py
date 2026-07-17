@@ -315,10 +315,17 @@ def apply_sequence(text: str, seq, cooldown=None, target="TARGET_SELF"
     # so a rewrite could change lines the user never touched. Refuse those.
     lossy_known = any(getattr(w, "lossy", False) for w in getattr(seq, "warnings", []))
     if not lossy_known and not _combo_is_faithful(text, seq):
+        # The whole-function rewrite would change lines the user didn't touch —
+        # but a pure value edit (an anim id, a priority) only needs its own line
+        # rewritten. Splice just those, keeping the args the model inlined
+        # (`local7`, `local8`), and leave the rest of the function alone.
+        spliced = _try_value_splice(text, seq)
+        if spliced is not None:
+            return spliced
         return text, ["This combo has parts the tool can't reproduce exactly "
                       "(e.g. values inlined from `local`s). It shows and edits "
-                      "here, but writing could change lines you didn't touch, so "
-                      "it was NOT written."]
+                      "here, but only value edits (anim id, priority…) can be "
+                      "written; this change was NOT written."]
 
     summary: list[str] = []
     if seq.trigger_type == "act_entry":
@@ -374,6 +381,119 @@ def _combo_is_faithful(text: str, seq) -> bool:
         return (generator.generate_interrupt_branch(fresh).rstrip("\n")
                 == text[span[0]:span[1]].rstrip("\n"))
     return True
+
+
+# --- value-only edits to a combo, spliced line by line ---------------------
+
+def _disk_combo(text: str, seq):
+    from parser import parse_file
+    for s in parse_file(text).sequences:
+        if s.trigger_type == seq.trigger_type and s.trigger_id == seq.trigger_id:
+            return s
+    return None
+
+
+def _collect_step_edits(model_items, disk_items, out) -> bool:
+    """Walk the model and on-disk item trees in parallel. True (with `out`
+    filled) only when the two are identical except for scalar values on some
+    ComboSteps — anything structural (added/removed/reordered item, an edited
+    condition or raw line) returns False so the caller falls back to refusing."""
+    if len(model_items) != len(disk_items):
+        return False
+    for a, b in zip(model_items, disk_items):
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, ComboStep):
+            if a.line != b.line:            # moved/reordered — not a value edit
+                return False
+            if a != b:                      # line is compare=False, so this is value-only
+                if a.line is None or len(a.extra_args) != len(b.extra_args):
+                    return False
+                out.append((a, b))
+        elif isinstance(a, Branch):
+            if (a.terms != b.terms or a.connective != b.connective
+                    or a.from_elseif != b.from_elseif):
+                return False
+            if not _collect_step_edits(a.true_branch, b.true_branch, out):
+                return False
+            if not _collect_step_edits(a.false_branch, b.false_branch, out):
+                return False
+        elif a != b:                        # RawLine (or anything else) must match
+            return False
+    return True
+
+
+def _logical_span_end(lines, start: int) -> int:
+    """Last physical line index of the statement starting at `lines[start]`
+    (parens balanced, so a wrapped `:TimingSetNumber(...)` is included)."""
+    depth = 0
+    for i in range(start, len(lines)):
+        depth += lines[i].count("(") - lines[i].count(")")
+        if depth <= 0:
+            return i
+    return start
+
+
+def _splice_step(lines, model, disk):
+    """Rewrite the one AddSubGoal statement `model` came from, substituting only
+    the fields that changed and keeping every other arg token verbatim. Mutates
+    `lines`; returns a summary string, or None if it can't be done safely."""
+    from parser import _balanced_call, _split_top_level
+    start = model.line - 1
+    if not (0 <= start < len(lines)) or "AddSubGoal(" not in lines[start]:
+        return None
+    end = _logical_span_end(lines, start)
+    span = "\n".join(lines[start:end + 1])
+    open_idx = span.index("AddSubGoal(") + len("AddSubGoal")
+    inside, after = _balanced_call(span, open_idx)
+    orig = [t.strip() for t in _split_top_level(inside)]
+    if len(orig) != 5 + len(disk.extra_args):
+        return None                          # unexpected shape — don't guess
+
+    # (positional index, label, model value, disk value, new token) — a token is
+    # replaced only where the model differs from disk, so args the model can't
+    # represent (`local7`) stay verbatim
+    fields = [(0, "goal type", model.goal_type, disk.goal_type,
+               generator.goal_type_to_lua(model.goal_type)),
+              (1, "priority", model.priority, disk.priority, str(model.priority)),
+              (2, "anim id", model.anim_id, disk.anim_id, str(model.anim_id)),
+              (3, "target", model.target, disk.target, str(model.target)),
+              (4, "distance", model.distance, disk.distance, str(model.distance))]
+    fields += [(5 + k, f"extra[{k}]", model.extra_args[k], disk.extra_args[k],
+                str(model.extra_args[k])) for k in range(len(model.extra_args))]
+
+    tokens, changed = list(orig), []
+    for i, label, mv, dv, new in fields:
+        if mv != dv:
+            tokens[i] = new
+            changed.append(label)
+    if not changed:
+        return None
+
+    new_span = span[:open_idx + 1] + ", ".join(tokens) + span[after - 1:]
+    lines[start:end + 1] = new_span.split("\n")
+    return f"line {model.line}: {', '.join(changed)}"
+
+
+def _try_value_splice(text: str, seq):
+    """(new_text, summary) if `seq`'s only changes vs the file are ComboStep
+    values, spliced onto their own lines; None otherwise."""
+    disk = _disk_combo(text, seq)
+    if disk is None:
+        return None
+    edits: list = []
+    if not _collect_step_edits(seq.steps, disk.steps, edits) or not edits:
+        return None
+    lines = text.split("\n")
+    summary = []
+    # bottom-up: a splice can change a statement's line count (unwrapping a
+    # chained call), which would shift the lines of edits above it
+    for model, disk_step in sorted(edits, key=lambda e: e[0].line, reverse=True):
+        res = _splice_step(lines, model, disk_step)
+        if res is None:
+            return None                      # bail entirely rather than half-write
+        summary.append(res)
+    return "\n".join(lines), summary
 
 
 # --- selector weight tables (Goal.Activate / Goal.Kengeki_Activate) --------

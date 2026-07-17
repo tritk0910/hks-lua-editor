@@ -30,6 +30,14 @@ class ComboStep:
                                 # (NOT a duration — see 710300_battle.lua.)
     target: str = "TARGET_ENE_0"
     extra_args: list = field(default_factory=list)  # raw leftover positional args
+    #: verbatim chained call(s) after the AddSubGoal `)`, e.g.
+    #: ":TimingSetNumber(9, 1, AI_TIMING_SET__ACTIVATE)". Kept so a rewrite
+    #: doesn't drop them; "" for steps built in the editor.
+    chained: str = ""
+    #: source line in the file, so a value edit can be spliced onto that one
+    #: line (keeping args the model inlined, e.g. `local7`). compare=False so a
+    #: step still equals its snapshot by value. None for steps built here.
+    line: int | None = field(default=None, compare=False)
 
 
 @dataclass

@@ -66,12 +66,19 @@ def test_interrupt_5031_random_two_finals(parsed):
     assert branch.false_branch[0].anim_id == 3041
 
 
-def test_interrupt_3710071_chained_timing_warns(parsed):
+def _steps(items):
+    for it in items:
+        if isinstance(it, ComboStep):
+            yield it
+        elif isinstance(it, Branch):
+            yield from _steps(it.true_branch)
+            yield from _steps(it.false_branch)
+
+
+def test_interrupt_3710071_chained_timing_kept(parsed):
+    # the chained :TimingSetNumber is kept on the step, not dropped+warned
     seq = _interrupt(parsed, 3710071)
-    # the branch parses at least one step
-    assert seq.steps
-    # a warning about the dropped :TimingSetNumber chain was recorded
-    assert any("chained call after AddSubGoal" in w.message for w in parsed.warnings)
+    assert any(":Timing" in s.chained for s in _steps(seq.steps))
 
 
 def test_act23_param_if_skipped_with_warning(parsed):
@@ -182,10 +189,9 @@ def test_kengeki37_elseif_vs_nested_if(parsed):
     assert elseif66.from_elseif is True
 
 
-def test_kengeki02_chained_timing(parsed):
+def test_kengeki02_chained_timing_kept(parsed):
     seq = _kengeki(parsed, 2)
-    assert seq.steps  # parsed at least one AddSubGoal
-    assert any("chained call after AddSubGoal" in w.message for w in parsed.warnings)
+    assert any(":Timing" in s.chained for s in _steps(seq.steps))
 
 
 # --- Slice 3b: Kengeki_Activate selector ----------------------------------

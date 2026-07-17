@@ -67,7 +67,8 @@ def render_step(step: ComboStep, receiver: str, indent: str = "") -> str:
         _fmt_arg(step.distance),
     ]
     args.extend(_fmt_arg(a) for a in step.extra_args)
-    return f"{indent}{receiver}:AddSubGoal({', '.join(args)})"
+    # any `:TimingSetNumber(...)` chain is kept verbatim on the step
+    return f"{indent}{receiver}:AddSubGoal({', '.join(args)}){step.chained}"
 
 
 # --- rendering a branch split ----------------------------------------------

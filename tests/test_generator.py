@@ -30,6 +30,16 @@ def test_render_step_arg_order():
     )
 
 
+def test_render_step_keeps_a_chained_timing_call():
+    step = ComboStep(goal_type="AttackTunableSpin", anim_id=3026, priority=10,
+                     distance=999, extra_args=[0],
+                     chained=":TimingSetNumber(7, 1, AI_TIMING_SET__ACTIVATE)")
+    assert render_step(step, "arg1", "") == (
+        "arg1:AddSubGoal(GOAL_COMMON_AttackTunableSpin, 10, 3026, TARGET_ENE_0, 999, 0)"
+        ":TimingSetNumber(7, 1, AI_TIMING_SET__ACTIVATE)"
+    )
+
+
 def test_generate_act_flat_chain_matches_act04():
     # Reference Goal.Act04, lines 330-335 of 710300_battle.lua
     seq = ComboSequence(
